@@ -3,16 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- Privacy: the page may only contact itself and the two free weather APIs. Usage data never leaves the browser. -->
+<!-- Privacy: the page may only contact itself and two free weather APIs. Personal data never leaves the device. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.weather.gov https://archive-api.open-meteo.com; img-src 'self' data:; style-src 'self'; script-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#0c1322">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Energy">
-<meta name="description" content="Private, recommendation-only thermostat and electricity dashboard.">
-<title>Apartment Energy Optimizer</title>
+<meta name="description" content="What to set your thermostat to, and whether it's saving electricity. Private and offline.">
+<title>Energy</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <!-- PNG icons are rendered from icon.svg by the GitHub Pages build -->
@@ -21,11 +22,9 @@
 <script type="module" src="app.js"></script>
 </head>
 <body>
-<div class="shell">
-  <nav class="nav" id="nav" aria-label="Sections"></nav>
-  <main id="view" class="view" tabindex="-1"><p class="muted">Loading…</p></main>
-</div>
+<main id="view" class="page" tabindex="-1"><p class="fine center">Loading…</p></main>
+<nav id="nav" class="tabbar" aria-label="Sections"></nav>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
-<noscript><p class="pad">This app needs JavaScript. Nothing is sent anywhere; it runs entirely in your browser.</p></noscript>
+<noscript><p class="page">This app needs JavaScript. Nothing is sent anywhere; it runs entirely on your device.</p></noscript>
 </body>
 </html>

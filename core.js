@@ -460,7 +460,11 @@ export function fitBaseline(points) {
   const sse = sum(points.map((p) => (p.kwh - predict(p)) ** 2));
   const my = avg(y), sst = sum(y.map((v) => (v - my) ** 2));
   const ranges = Object.fromEntries(['hdd', 'cdd'].map((f) => [f, [Math.min(...points.map((p) => p[f])), Math.max(...points.map((p) => p[f]))]]));
-  return { feats, coef, se: Math.sqrt(sse / Math.max(1, points.length - k)), n: points.length, r2: sst > 0 ? 1 - sse / sst : 0, predict, ranges };
+  const se = Math.sqrt(sse / Math.max(1, points.length - k));
+  // Standard errors from the diagonal of (XᵀX)⁻¹ · s².
+  const inv = Array.from({ length: k }, (_, j) => solve(A, Array.from({ length: k }, (_, i) => (i === j ? 1 : 0))));
+  const coefSE = inv.every(Boolean) ? inv.map((col, j) => Math.sqrt(Math.max(0, col[j])) * se) : null;
+  return { feats, coef, coefSE, se, n: points.length, r2: sst > 0 ? 1 - sse / sst : 0, predict, ranges };
 }
 
 export function evaluateSavings({ usage, temps, changeDate, tariff }) {
@@ -488,4 +492,27 @@ export function evaluateSavings({ usage, temps, changeDate, tariff }) {
     dollars: rate != null ? diff * rate : null, dollarsUnc: rate != null ? unc * rate : null,
     model: { feats: model.feats, r2: model.r2, se: model.se }, caveats,
   };
+}
+
+/**
+ * How this home's daily electricity responds to outdoor temperature, from matched real days.
+ * Returns status 'learning' until `minDays` complete days with both usage and observed weather exist —
+ * nothing is estimated before then.
+ */
+export function energyWeatherModel(usage, temps, minDays = 30) {
+  const days = dailyTotals(usage)
+    .filter((d) => d.complete && Number.isFinite(temps?.[d.date]))
+    .map((d) => ({ date: d.date, kwh: d.kwh, temp: temps[d.date], ...degreeDays(temps[d.date]) }));
+  const bins = {};
+  for (const d of days) {
+    const lo = Math.floor(d.temp / 10) * 10;
+    (bins[lo] ||= { lo, n: 0, sum: 0 });
+    bins[lo].n++;
+    bins[lo].sum += d.kwh;
+  }
+  const out = { n: days.length, need: minDays, days, bins: Object.values(bins).sort((a, b) => a.lo - b.lo).map((b) => ({ lo: b.lo, n: b.n, avg: b.sum / b.n })) };
+  const m = days.length >= minDays ? fitBaseline(days) : null;
+  if (!m || !m.coefSE) return { ...out, status: 'learning' };
+  const term = (f) => { const i = m.feats.indexOf(f) + 1; return i ? { per: m.coef[i], ci: 1.96 * m.coefSE[i] } : null; };
+  return { ...out, status: 'ready', r2: m.r2, se: m.se, base: { per: m.coef[0], ci: 1.96 * m.coefSE[0] }, heat: term('hdd'), cool: term('cdd'), predict: m.predict };
 }
