@@ -1,0 +1,37 @@
+{
+ "station": {
+  "id": "KILG",
+  "iem": "ILG",
+  "name": "Wilmington airport (KILG)"
+ },
+ "updatedAt": "2026-11-04T19:52:45.342Z",
+ "lastSnapshotAt": "2026-11-04T19:52:45.342Z",
+ "lastObservation": {
+  "key": "2026-11-04T20:00Z",
+  "t": 73.4,
+  "rh": 56.9,
+  "wind": 12.7,
+  "precip": null,
+  "at": "2026-11-04T19:35:00.000Z",
+  "src": "nws"
+ },
+ "hours": 24590,
+ "days": 1021,
+ "coverageFrom": "2024-01-01T01:00Z",
+ "missingLast10Days": 1,
+ "added": {
+  "nws": {
+   "added": 48,
+   "updated": 83
+  },
+  "iem": {
+   "added": 24542,
+   "updated": 14
+  }
+ },
+ "errors": [],
+ "sources": {
+  "observations": "NWS api.weather.gov (KILG) with Iowa Environmental Mesonet ASOS archive for backfill/gaps",
+  "forecast": "NWS hourly forecast"
+ }
+}
