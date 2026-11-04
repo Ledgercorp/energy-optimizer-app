@@ -63,7 +63,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin > /dev/null
           mkdir _site
-          cp index.html styles.css app.js core.js weather.js thermostat.js sw.js manifest.webmanifest icon.svg _site/
+          cp index.html styles.css app.js core.js weather.js advisor.js thermostat.js sw.js manifest.webmanifest icon.svg _site/
           if [ -d data/weather ]; then mkdir -p _site/data && cp -r data/weather _site/data/; fi
           touch _site/.nojekyll
           # Home Screen icons need full-bleed PNGs (iOS rounds the corners itself).
