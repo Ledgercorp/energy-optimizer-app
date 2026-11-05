@@ -1,6 +1,7 @@
 name: site
 # Hourly: collect public Wilmington weather, commit it, redeploy GitHub Pages.
 # On code pushes: just redeploy. Public repo => Actions minutes are free.
+# The aeo-operator Worker dispatches this when the hourly schedule is missed, and to deliver validated insights.
 on:
   push:
     branches: [main]
@@ -11,6 +12,10 @@ on:
     inputs:
       backfill_from:
         description: 'Optional YYYY-MM-DD: backfill station history from this date'
+        required: false
+        default: ''
+      insights:
+        description: 'Operator insights JSON from the aeo-operator Worker (validated again before publishing)'
         required: false
         default: ''
 
@@ -37,6 +42,7 @@ jobs:
       - name: Collect weather (public city-level data only)
         env:
           BACKFILL: ${{ inputs.backfill_from }}
+          INSIGHTS: ${{ inputs.insights }}
         run: node collector/collect.mjs "$BACKFILL"
       - name: Commit data
         run: |
