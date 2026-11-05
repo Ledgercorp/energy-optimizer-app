@@ -80,7 +80,7 @@ const recNow = () => C.recommend(S, forecastHours(), Date.now());
 const usageDays = () => C.dailyTotals(S.usage).filter((d) => d.complete);
 /** Validated findings from the automatic weather review (public data only). */
 const opsItems = () => (WD.insights?.items || []).filter((i) => Date.parse(i.valid_until) > Date.now());
-const savings = () => C.evaluateSavings({ usage: S.usage, temps: allTemps(), changeDate: S.profile.changeDate, tariff: S.profile.tariff });
+const savings = () => A.savingsReport({ usage: S.usage, temps: allTemps(), tariff: S.profile.tariff, hvacMetered: S.profile.hvacMetered, history: S.programmedHistory, changeDate: S.profile.changeDate });
 function usageTrend() {
   const d = usageDays();
   if (!d.length) return null;
@@ -163,7 +163,7 @@ const TABS = [['today', 'Today'], ['insights', 'Insights'], ['settings', 'Settin
 const pagehead = (h, eyebrow = '') => `<header class="pagehead"><div>${eyebrow ? `<p class="eyebrow">${eyebrow}</p>` : ''}<h1>${h}</h1></div></header>`;
 const back = (href, label) => `<a class="back" href="#${href}">‹ ${label}</a>`;
 const disclosure = (id, summary, body, open = false) => `<details class="disclosure" data-id="${id}" ${open || UI.open?.[id] ? 'open' : ''}><summary>${summary}</summary><div class="disc-body">${body}</div></details>`;
-const importButton = (label = 'Import Delmarva file') => `<label class="btn primary file">${label}<input type="file" id="usage-file" accept=".csv,.xml,text/csv,text/xml,application/xml"></label>`;
+const importButton = (label = 'Import Delmarva file') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".csv,.xml,text/csv,text/xml,application/xml"></label>`;
 const HOW_TO_DOWNLOAD = `<ol class="steps"><li>Sign in to <b>Delmarva My Account</b>.</li><li>Open <b>My Usage</b> → <b>Green Button: Download my data</b>.</li><li>Choose the longest date range and download <b>CSV</b> (or XML).</li><li>Come back and tap <b>Import Delmarva file</b>. The rest is automatic.</li></ol><p class="fine">Delmarva doesn’t let personal apps fetch usage without your password, and this app never asks for it. The file stays on this device.</p>`;
 const keys = (t) => esc(t)
   .replace(/\b(MENU|RUN|DONE|HOME|NEXT)\b/g, '<kbd class="key">$1</kbd>')
@@ -239,8 +239,8 @@ function progressCard() {
   const c = {
     no_change_date: ['', 'Savings tracking starts when you program your thermostat', 'The app then compares your use with what the weather predicts.'],
     insufficient: ['', 'Measuring savings…', `Collecting days: ${num(Math.min(sv.before ?? 0, 14))} of 14 before and ${num(Math.min(sv.after ?? 0, 7))} of 7 after your schedule change.`],
-    likely_savings: ['good', `Using about ${num(sv.pct, 0)}% less than expected`, 'Since your schedule change, adjusted for the weather.'],
-    likely_increase: ['warn', 'Use is up since your schedule change', `About ${num(-sv.pct, 0)}% more than the weather explains. Other changes at home can cause this.`],
+    likely_savings: ['good', `Using about ${num(sv.weather?.pct, 0)}% less than expected`, 'Since your schedule change, adjusted for the weather.'],
+    likely_increase: ['warn', 'Use is up since your schedule change', `About ${num(-sv.weather?.pct, 0)}% more than the weather explains. Other changes at home can cause this.`],
     inconclusive: ['', 'No clear change yet', 'The difference is within normal day-to-day variation. More days will tell.'],
   }[sv.status] || ['', 'Savings', sv.message || ''];
   return `<a class="card ${c[0]}" href="#savings"><p class="card-label"><i class="dot"></i>Savings</p><h2>${esc(c[1])}</h2><p>${esc(c[2])}</p>${stale}</a>`;
@@ -278,9 +278,23 @@ function viewSchedule() {
 
 function findingsList() {
   const f = A.buildInsights({ state: S, temps: allTemps() }).map((x) => ({ ...x, src: '' }));
-  const ops = opsItems().map((x) => ({ tone: x.tone, title: x.title, detail: `${x.detail}${x.action ? ` ${x.action}` : ''}`, src: 'Automatic weather review' }));
+  const fc = A.forecastUse(C.energyWeatherModel(S.usage, allTemps()), recNow().outlook, S.profile.tariff);
+  const typical = usageTrend()?.avg;
+  const ops = opsItems().map((x) => {
+    const mine = A.personalizeFinding(x, fc, typical);
+    return { tone: x.tone, title: x.title, detail: `${x.detail}${x.action ? ` ${x.action}` : ''}${mine ? ` ${mine}` : ''}`, src: mine ? 'Automatic weather review + your data, on this device' : 'Automatic weather review' };
+  });
   const all = [...ops, ...f];
   return all.length ? `<ul class="findings">${all.map((x) => `<li class="${esc(x.tone)}"><b>${esc(x.title)}</b><span>${esc(x.detail)}</span>${x.src ? `<span class="src">${esc(x.src)}</span>` : ''}</li>`).join('')}</ul>` : '<p class="fine">Nothing needs your attention right now.</p>';
+}
+const CONF = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence', info: 'Worth checking' };
+/** Deterministic, personalized suggestions; each says what, why, evidence, confidence and whether to reprogram. */
+function actionsCard() {
+  const items = A.opportunities({ state: S, rec: recNow(), model: C.energyWeatherModel(S.usage, allTemps()), summary: C.usageSummary(S.usage, S.profile.tariff) });
+  if (!items.length) return '';
+  const rate = C.energyCost(1, S.profile.tariff);
+  const est = (o) => (o.est ? ` Estimated ${num(o.est)} kWh a month${rate != null ? ` (≈ ${money(o.est * rate)} in energy charges)` : ''} — an estimate from your data, not a measurement.` : '');
+  return `<h2 class="section-title">Recommended actions</h2><section class="card"><ul class="findings actions">${items.slice(0, 4).map((o) => `<li><b>${esc(o.what)}</b><span>${esc(o.why)}</span><span><i>Evidence:</i> ${esc(o.evidence)}${esc(est(o))}</span><span><i>${CONF[o.confidence]}.</i> ${esc(o.confidenceWhy)} ${o.reprogram ? 'Needs a thermostat schedule update.' : 'No reprogramming needed.'}</span>${o.apply ? `<button class="btn secondary" data-act="apply" data-k="${esc(o.apply.k)}" data-v="${o.apply.v}" data-label="${esc(o.apply.label)}">Use ${o.apply.v}°</button>` : ''}</li>`).join('')}</ul></section>`;
 }
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
 
@@ -292,14 +306,18 @@ function viewInsights() {
     out.push(`<section class="card"><h2>See what’s actually working</h2><p>Import your Delmarva usage file. It’s analyzed on this device and matched with Wilmington weather automatically.</p>${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}</section>`);
     out.push(disclosure('howto', 'How to get the file from Delmarva', HOW_TO_DOWNLOAD, true));
     out.push(`<h2 class="section-title">Automatic weather review</h2><section class="card">${findingsList()}</section>`);
+    out.push(actionsCard());
     out.push(`<div class="grid">${weatherLink()}</div>`);
     return out.join('');
   }
-  const tr = usageTrend();
-  out.push(`<section class="card"><div class="stats"><div class="stat"><b>${num(tr.avg, 1)}</b><span>kWh a day, last ${tr.days} days</span></div>${tr.pct == null ? '' : `<div class="stat"><b>${signed(tr.pct, 0)}%</b><span>vs. the 30 days before</span></div>`}</div><p class="fine">${tr.pct == null ? 'A month-to-month comparison appears once you have about two months of data. ' : ''}Raw totals; the Savings page adjusts for weather.</p></section>`);
+  const tr = usageTrend(), sw = A.similarWeather(S.usage, allTemps()), dq = A.dataQuality(S.usage, allTemps(), todayIso());
+  const swStat = sw.status === 'ok' ? `<div class="stat"><b>${signed(sw.pct, 0)}%</b><span>vs. ${sw.matched} earlier days with similar weather</span></div>` : '';
+  out.push(`<section class="card"><div class="stats"><div class="stat"><b>${num(tr.avg, 1)}</b><span>kWh a day, last ${tr.days} days</span></div>${tr.pct == null ? '' : `<div class="stat"><b>${signed(tr.pct, 0)}%</b><span>vs. the 30 days before</span></div>`}${swStat}</div><p class="fine">${tr.pct == null ? 'A month-to-month comparison appears once you have about two months of data. ' : ''}${sw.status === 'ok' ? `Similar weather: the last ${sw.n} days vs. earlier days within ${sw.tol}°F, same weekday/weekend mix — ${sw.meaningful ? 'a real difference' : 'within normal variation'}. ` : ''}The Savings page adjusts for weather.</p></section>`);
   out.push(`<h2 class="section-title">What we found</h2><section class="card">${findingsList()}</section>`);
+  out.push(actionsCard());
+  out.push(`<section class="card ${dq.status === 'attention' ? 'warn' : ''}"><p class="card-label">${dq.status === 'attention' ? '<i class="dot"></i>' : ''}Data coverage</p><ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>`);
   const sv = savings();
-  const svLine = { likely_savings: `About ${num(sv.pct, 0)}% less than expected`, likely_increase: 'Use is up since the change', inconclusive: 'No clear change yet', insufficient: 'Collecting enough days', no_change_date: 'Starts when you program the thermostat' }[sv.status] || 'Savings';
+  const svLine = { likely_savings: `About ${num(sv.weather?.pct, 0)}% less than expected`, likely_increase: 'Use is up since the change', inconclusive: 'No clear change yet', insufficient: 'Collecting enough days', no_change_date: 'Starts when you program the thermostat' }[sv.status] || 'Savings';
   out.push(`<h2 class="section-title">Details</h2><div class="grid three">
     <a class="card" href="#usage"><p class="card-label">Electricity use</p><h2>Daily use and patterns</h2><p>Day by day, a typical day, and how weather affects it.</p></a>
     <a class="card" href="#savings"><p class="card-label">Savings</p><h2>${esc(svLine)}</h2><p>How it’s measured and what’s still uncertain.</p></a>
@@ -313,7 +331,8 @@ function viewUsage() {
   if (!s) return `${back('insights', 'Insights')}${pagehead('Electricity use')}<section class="card"><p>No electricity data yet.</p>${importButton()}</section>`;
   const r = s.recent, temps = allTemps();
   const daily = barChart(r.map((d) => d.kwh), { label: 'Daily electricity use, kWh', ticks: r.map((d) => dayLabel(d.date, { month: 'numeric', day: 'numeric' })), tips: r.map((d) => `${dayLabel(d.date)}: ${num(d.kwh, 1)} kWh${d.cost != null ? ` · ${money(d.cost)}` : ''}${Number.isFinite(temps[d.date]) ? ` · ${num(temps[d.date])}°F outside` : ''}`), low: (i) => C.isWeekendDate(r[i].date) });
-  const prof = s.hourProfile ? `<section class="card"><h2>A typical day</h2><p class="fine">Average use by hour.${s.peakHour != null ? ` Busiest around ${hourLabel(s.peakHour)}.` : ''}</p>${barChart(s.hourProfile, { label: 'Average use by hour of day', ticks: s.hourProfile.map((_, h) => hourLabel(h)), tips: s.hourProfile.map((v, h) => `${hourLabel(h)}: ${num(v, 2)} kWh average`) })}</section>` : '';
+  const pk = A.peakWindow(s.hourProfile);
+  const prof = s.hourProfile ? `<section class="card"><h2>A typical day</h2><p class="fine">Average use by hour.${pk ? ` Most use is ${hourLabel(pk.start)}–${hourLabel(pk.end % 24)} (${num(pk.share * 100)}% of a typical day).` : ''}</p>${barChart(s.hourProfile, { label: 'Average use by hour of day', ticks: s.hourProfile.map((_, h) => hourLabel(h)), tips: s.hourProfile.map((v, h) => `${hourLabel(h)}: ${num(v, 2)} kWh average`) })}</section>` : '';
   const m = C.energyWeatherModel(S.usage, temps);
   let weather = '<p class="fine">Days with both your electricity data and measured weather are matched automatically.</p>';
   if (m.n) {
@@ -336,31 +355,39 @@ function viewUsage() {
 }
 
 function viewSavings() {
-  const p = S.profile, days = usageDays(), sv = savings();
+  const p = S.profile, sv = savings(), w = sv.weather;
   const headline = {
-    no_change_date: ['Not started yet', 'Savings are measured from the day you program the thermostat schedule.'],
+    no_change_date: ['Not started yet', sv.message],
     insufficient: ['Collecting enough days', sv.message],
-    likely_savings: [`About ${num(sv.pct, 0)}% less than expected`, `${num(sv.diff)} kWh less than the weather predicts over ${sv.after} days (likely range ±${num(sv.unc)} kWh).`],
-    likely_increase: ['Use is up since the change', `${num(-sv.diff)} kWh more than the weather predicts over ${sv.after} days (±${num(sv.unc)}).`],
-    inconclusive: ['No clear change yet', `The difference (${num(sv.diff)} kWh over ${sv.after} days) is within normal variation (±${num(sv.unc)}).`],
+    likely_savings: [`About ${num(w?.pct, 0)}% less than expected`, `${num(w?.diff)} kWh less than the weather predicts over ${w?.days} days (likely range ±${num(w?.unc)} kWh). Consistent with the schedule helping — not proof of it.`],
+    likely_increase: ['Use is up since the change', `${num(-w?.diff)} kWh more than the weather predicts over ${w?.days} days (±${num(w?.unc)}).`],
+    inconclusive: ['No clear change yet', `The difference (${num(w?.diff)} kWh over ${w?.days} days) is within normal variation (±${num(w?.unc)}).`],
   }[sv.status] || ['Savings', sv.message || ''];
   const item = (done, title, sub) => `<li class="${done ? 'done' : ''}"><span class="mark">${done ? '✓' : '·'}</span><div><b>${title}</b><small>${sub}</small></div></li>`;
-  const checklist = `<ol class="checklist">
-    ${item(days.length >= 21, 'Electricity data', days.length ? `${days.length} days, through ${esc(shortDate(days[days.length - 1].date))}` : 'Import your Delmarva file on Insights')}
-    ${item(!!p.changeDate, 'A schedule change date', p.changeDate ? `You programmed the schedule on ${esc(shortDate(p.changeDate))}` : 'Set automatically when you finish programming the thermostat')}
-    ${item(sv.before >= 14 && sv.after >= 7, 'Enough days on both sides', `${num(sv.before ?? 0)} of 14 before and ${num(sv.after ?? 0)} of 7 after, with measured weather`)}
-    ${item(true, 'Weather matched automatically', 'Daily temperatures from the Wilmington airport station')}</ol>`;
+  const checklist = `<ol class="checklist">${sv.inputs.map((i) => item(i.ok, esc(i.label), esc(i.detail))).join('')}</ol>`;
   const metered = { yes: 'Yes', partial: 'Partly (fan only)', no: 'No, the building pays', unknown: 'Not sure' };
-  const numbers = ['likely_savings', 'likely_increase', 'inconclusive'].includes(sv.status)
-    ? `<div class="stats"><div class="stat"><b>${num(sv.actual, 0)}</b><span>actual kWh</span></div><div class="stat"><b>${num(sv.predicted, 0)}</b><span>expected for the weather</span></div></div>${sv.dollars != null ? `<p>≈ ${money(sv.dollars)} ± ${money(sv.dollarsUnc)} in energy charges at your confirmed rate.</p>` : '<p class="fine">Dollar figures appear only with a rate you confirmed from your bill (Settings → Advanced).</p>'}<ul class="bullets">${sv.caveats.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><p class="fine">Model fit on the days before the change: R² ${num(sv.model.r2, 2)}.</p>`
-    : '<p class="fine">Numbers appear once there are enough days on both sides of the change.</p>';
+  const row = (label, value, note) => `<tr><td>${label}<small>${note}</small></td><td class="t">${value}</td></tr>`;
+  const a = sv.actual, since = sv.timeline.baselineEnd;
+  const bill = !sv.savings ? '' : !sv.savings.billRelevant ? ' · not expected on your bill' : sv.savings.dollars != null ? ` · ≈ ${money(sv.savings.dollars)} ± ${money(sv.savings.dollarsUnc)}` : '';
+  const breakdown = sv.status === 'no_change_date' ? '' : `<h2 class="section-title">The numbers, kept separate</h2><section class="card"><div class="table-wrap"><table class="breakdown"><tbody>
+    ${row('Measured use', a.days ? `${num(a.kwh)} kWh` : '—', a.days ? `${a.days} full days since ${esc(shortDate(since))}, from your Delmarva data` : 'No full days since the change yet')}
+    ${row('Billed charges', sv.billed != null ? money(sv.billed) : '—', sv.billed != null ? 'From the cost column in your Delmarva file' : 'Your file had no cost for these days')}
+    ${row('Estimated energy cost', sv.estimatedCost != null ? money(sv.estimatedCost) : '—', sv.estimatedCost != null ? `Measured kWh × your ${num(sv.rate * 100, 1)}¢ rate; excludes fixed charges and taxes` : 'Needs your rate from a bill (Settings → Advanced)')}
+    ${row('Weather-adjusted change', w ? `${signed(-w.pct, 1)}%` : '—', w ? `${num(w.actual)} kWh used vs. ${num(w.predicted)} kWh the baseline predicts for the actual weather` : 'Needs 14 days before and 7 after, with weather')}
+    ${row('Estimated savings vs. baseline', w ? `${num(w.diff)} kWh${bill}` : '—', w ? 'Positive means less than predicted' : '—')}
+    ${row('Uncertainty', w ? `±${num(w.unc)} kWh` : '—', w ? `95% range; baseline fit R² ${num(w.r2, 2)}` : '—')}
+  </tbody></table></div>${sv.limitations.length ? `<p class="card-label">Limitations</p><ul class="bullets">${sv.limitations.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}</section>`;
+  const versions = sv.segments?.length ? `<div class="table-wrap"><table><thead><tr><th>Schedule from</th><th class="t">Days</th><th class="t">vs. baseline</th></tr></thead><tbody>${sv.segments.map((g) => `<tr><td>${esc(shortDate(g.from))}${g.to ? ` – ${esc(shortDate(g.to))}` : ' – now'}</td><td class="t">${num(g.ev.after ?? 0)}</td><td class="t">${g.ev.diff != null ? `${num(g.ev.diff)} ± ${num(g.ev.unc)} kWh` : 'not enough days'}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const hist = (S.programmedHistory || []).slice().reverse();
+  const history = hist.length ? `<ul class="bullets">${hist.map((h) => `<li><b>${esc(dayLabel(h.date))}</b> — ${esc(h.changes.length ? h.changes.join('; ') : 'Schedule confirmed')}</li>`).join('')}</ul>${versions}<p class="fine">Recorded when you tap “Done — it’s programmed”. The app can’t see the thermostat, so these are your confirmations, not readings from the device.</p>` : '<p class="fine">No schedule has been confirmed as programmed yet.</p>';
   return `${back('insights', 'Insights')}${pagehead('Savings')}
     <section class="card ${sv.status === 'likely_savings' ? 'good' : sv.status === 'likely_increase' ? 'warn' : ''}"><h2>${esc(headline[0])}</h2><p>${esc(headline[1])}</p></section>
     <h2 class="section-title">What’s needed</h2><section class="card">${checklist}</section>
+    ${breakdown}
     <section class="card"><h2>Is heating and cooling on your electric meter?</h2><p>In many apartment buildings the building pays for heating and cooling. If so, a better schedule saves building energy but won’t change your bill.</p><label class="item"><span>On our meter?</span><select data-k="profile.hvacMetered" data-label="Heating/cooling on our meter" data-rerender>${Object.entries(metered).map(([v, l]) => `<option value="${v}" ${p.hvacMetered === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></section>
-    <h2 class="section-title">How it’s measured</h2><section class="card"><ol class="steps"><li>Before the change, the app learns how your daily use follows outdoor temperature.</li><li>After the change, it predicts what you would have used in the actual weather.</li><li>Savings are the difference between that prediction and what you really used, with a likely range.</li></ol><p class="fine">It’s an estimate, not proof: guests, travel, new appliances or building changes also move usage.</p></section>
-    ${disclosure('sv-numbers', 'Numbers and caveats', numbers)}
-    ${disclosure('sv-date', 'Change the start date', `<label class="field">Schedule change date<input type="date" data-k="profile.changeDate" data-label="Schedule change date" data-rerender value="${esc(p.changeDate)}"></label><p class="fine">Set automatically when you finish programming. Change it only if you started the schedule on a different day.</p>`)}`;
+    <h2 class="section-title">How it’s measured</h2><section class="card"><p>${esc(sv.method || 'Before the change, the app learns how your daily use follows outdoor temperature (and weekdays vs. weekends). After it, the app predicts what you would have used in the actual weather; savings are the difference, with a likely range.')}</p><p class="fine">A before-and-after comparison can’t prove the thermostat caused a change: guests, travel, new appliances or building changes also move usage. Missing or partial days are left out, never filled in.</p></section>
+    ${disclosure('sv-history', 'Schedule history', history)}
+    ${disclosure('sv-date', 'Change the start date', `<label class="field">Schedule change date<input type="date" data-k="profile.changeDate" data-label="Schedule change date" data-rerender value="${esc(p.changeDate)}"></label><p class="fine">Set automatically the first time you finish programming. Change it only if you started the schedule on a different day.</p>`)}`;
 }
 
 function viewWeather() {
@@ -633,7 +660,10 @@ const seasonName = (v) => SEASONS.find(([k]) => k === v)?.[1];
 
 function markProgrammed() {
   const rec = recNow();
-  S.programmed = { fingerprint: A.planFingerprint(rec.plans), date: todayIso() };
+  const fp = A.planFingerprint(rec.plans), date = todayIso(), prev = S.programmed?.fingerprint;
+  const changes = !prev ? ['First schedule'] : prev === fp ? ['Same schedule confirmed again'] : A.scheduleDiff(prev, rec.plans);
+  S.programmedHistory = [...(S.programmedHistory || []), { date, fingerprint: fp, changes }].slice(-100);
+  S.programmed = { fingerprint: fp, date };
   const first = !S.profile.changeDate;
   if (first) S.profile.changeDate = todayIso();
   save();
@@ -684,6 +714,15 @@ const ACTIONS = {
     const first = markProgrammed();
     location.hash = 'today';
     toast(first ? 'Saved. Savings tracking starts today.' : 'Saved. Your schedule is up to date.');
+  },
+  apply(el) {
+    const k = el.dataset.k, v = Number(el.dataset.v);
+    if (!/^profile\.comfort\.(heat|cool)\.(away|sleep)$/.test(k) || !Number.isFinite(v)) return;
+    const was = getPath(S, k);
+    setPath(S, k, v);
+    save();
+    toast(`${el.dataset.label} set to ${v}° (was ${was}°). Update the thermostat from Today to use it.`);
+    render();
   },
   'mark-programmed'() {
     if (!confirm('Mark the current recommended schedule as programmed on your thermostat?')) return;
@@ -749,24 +788,28 @@ document.addEventListener('toggle', (e) => {
   if (d.matches?.('details.disclosure')) { UI.open = { ...UI.open, [d.dataset.id]: d.open }; saveUI(); }
 }, true);
 
-async function importUsage(f) {
+async function importUsage(files) {
   busy = 'import';
   render();
-  try {
-    const res = C.importUsageFile(f.name, await readFile(f));
-    const before = new Set(usageDays().map((d) => d.date));
-    S.usage = C.mergeUsage(S.usage, res.records);
-    save();
-    const days = usageDays();
-    const temps = allTemps();
-    const matched = days.filter((d) => Number.isFinite(temps[d.date])).length;
-    const added = days.filter((d) => !before.has(d.date)).length;
-    toast(`Imported through ${dayLabel(days[days.length - 1].date)}: ${added} new day${added === 1 ? '' : 's'}${res.skipped ? `, ${res.skipped} unreadable rows skipped` : ''}. ${matched} days matched with weather. Insights updated.`);
-    archiveTried = false;
-    fillArchive();
-  } catch (err) {
-    toast(`Couldn’t import that file: ${err.message}`, true);
+  const msgs = [];
+  let bad = false;
+  for (const f of files) {
+    try {
+      const res = C.importUsageFile(f.name, await readFile(f));
+      const before = S.usage;
+      S.usage = C.mergeUsage(S.usage, res.records); // merges by hour/day: never deletes history, never double-counts a re-import
+      msgs.push(`${files.length > 1 ? `${f.name}: ` : 'Imported '}${A.importSummary(before, S.usage, res).message}`);
+    } catch (err) {
+      bad = true;
+      msgs.push(`Couldn’t import ${files.length > 1 ? f.name : 'that file'}: ${err.message}`);
+    }
   }
+  save();
+  const days = usageDays(), temps = allTemps();
+  const matched = days.filter((d) => Number.isFinite(temps[d.date])).length;
+  toast(`${msgs.map((m) => m.replace(/\.$/, '')).join('. ')}.${!bad && days.length ? ` ${matched} days matched with weather. Insights updated.` : ''}`, bad && msgs.length === 1);
+  archiveTried = false;
+  fillArchive();
   busy = '';
   render();
 }
@@ -805,7 +848,7 @@ function homeAllDay(el) {
 
 document.addEventListener('change', async (e) => {
   const el = e.target;
-  if (el.id === 'usage-file' && el.files[0]) return importUsage(el.files[0]);
+  if (el.id === 'usage-file' && el.files.length) return importUsage([...el.files].slice(0, 24));
   if (el.id === 'backup-file' && el.files[0]) {
     try {
       const data = JSON.parse(await readFile(el.files[0]));
