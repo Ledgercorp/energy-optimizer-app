@@ -41,7 +41,7 @@ const avg = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
 let S = load();
 let UI = loadUI();
 let WD = { loaded: false, status: null, daily: null, skill: null, latest: null, insights: null, obs: {} };
-let busy = '', lastRefresh = 0, archiveTried = false;
+let busy = '', lastRefresh = 0, archiveTried = false, lastImport = '';
 let draft = null, setupStep = 0, setupError = '', progStep = 0, savedNote = null;
 
 function load() {
@@ -249,7 +249,7 @@ function progressCard() {
 function viewToday() {
   const rec = recNow();
   const st = A.todayStatus(S, rec);
-  const main = [hero(st, rec), programCard(st, rec)];
+  const main = [hero(st, rec), st.kind === 'setup' ? '' : learnedToday(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
@@ -276,25 +276,55 @@ function viewSchedule() {
 
 // ---------- Insights ----------
 
+/** Public weather findings from the cloud operator (it never sees household data); "for your home" lines are computed here. */
 function findingsList() {
-  const f = A.buildInsights({ state: S, temps: allTemps() }).map((x) => ({ ...x, src: '' }));
   const fc = A.forecastUse(C.energyWeatherModel(S.usage, allTemps()), recNow().outlook, S.profile.tariff);
   const typical = usageTrend()?.avg;
   const ops = opsItems().map((x) => {
     const mine = A.personalizeFinding(x, fc, typical);
     return { tone: x.tone, title: x.title, detail: `${x.detail}${x.action ? ` ${x.action}` : ''}${mine ? ` ${mine}` : ''}`, src: mine ? 'Automatic weather review + your data, on this device' : 'Automatic weather review' };
   });
-  const all = [...ops, ...f];
-  return all.length ? `<ul class="findings">${all.map((x) => `<li class="${esc(x.tone)}"><b>${esc(x.title)}</b><span>${esc(x.detail)}</span>${x.src ? `<span class="src">${esc(x.src)}</span>` : ''}</li>`).join('')}</ul>` : '<p class="fine">Nothing needs your attention right now.</p>';
+  return ops.length ? findingUl(ops) : '<p class="fine">No weather alerts right now.</p>';
 }
+const findingUl = (list) => `<ul class="findings">${list.map((x) => `<li class="${esc(x.tone)}"><b>${esc(x.title)}</b><span>${esc(x.detail)}</span>${x.src ? `<span class="src">${esc(x.src)}</span>` : x.prelim ? '<span class="src">Preliminary</span>' : ''}</li>`).join('')}</ul>`;
 const CONF = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence', info: 'Worth checking' };
-/** Deterministic, personalized suggestions; each says what, why, evidence, confidence and whether to reprogram. */
-function actionsCard() {
-  const items = A.opportunities({ state: S, rec: recNow(), model: C.energyWeatherModel(S.usage, allTemps()), summary: C.usageSummary(S.usage, S.profile.tariff) });
-  if (!items.length) return '';
-  const rate = C.energyCost(1, S.profile.tariff);
-  const est = (o) => (o.est ? ` Estimated ${num(o.est)} kWh a month${rate != null ? ` (≈ ${money(o.est * rate)} in energy charges)` : ''} — an estimate from your data, not a measurement.` : '');
-  return `<h2 class="section-title">Recommended actions</h2><section class="card"><ul class="findings actions">${items.slice(0, 4).map((o) => `<li><b>${esc(o.what)}</b><span>${esc(o.why)}</span><span><i>Evidence:</i> ${esc(o.evidence)}${esc(est(o))}</span><span><i>${CONF[o.confidence]}.</i> ${esc(o.confidenceWhy)} ${o.reprogram ? 'Needs a thermostat schedule update.' : 'No reprogramming needed.'}</span>${o.apply ? `<button class="btn secondary" data-act="apply" data-k="${esc(o.apply.k)}" data-v="${o.apply.v}" data-label="${esc(o.apply.label)}">Use ${o.apply.v}°</button>` : ''}</li>`).join('')}</ul></section>`;
+const report = () => A.usageReport({ state: S, temps: allTemps() });
+const actionsFor = (r) => A.opportunities({ state: S, rec: recNow(), model: C.energyWeatherModel(S.usage, allTemps()), summary: C.usageSummary(S.usage, S.profile.tariff), report: r });
+const applyBtn = (o) => `<button class="btn secondary" data-act="apply" data-k="${esc(o.apply.k)}" data-v="${o.apply.v}" data-label="${esc(o.apply.label)}">Use ${o.apply.v}°</button>`;
+const thermo = (o) => o.thermostat || (o.reprogram ? 'Needs a thermostat schedule update.' : 'No thermostat change needed.');
+const actionItem = (o) => `<li><b>${esc(o.what)}</b><span>${esc(o.why)}</span><span><i>Evidence:</i> ${esc(o.evidence)}</span>${o.impact ? `<span><i>Difference it could make:</i> ${esc(o.impact)}</span>` : ''}${o.investigate ? `<span><i>How to check:</i> ${esc(o.investigate)}</span>` : ''}<span><i>${CONF[o.confidence]}.</i> ${esc(o.confidenceWhy)} ${esc(thermo(o))}</span>${o.apply ? applyBtn(o) : ''}</li>`;
+/** Deterministic suggestions from this home's data; each says what, why, evidence, difference, confidence and the thermostat step. */
+function actionsCard(r = null) {
+  const items = actionsFor(r), nc = A.noChangeSummary(r, items);
+  if (!items.length && !nc) return '';
+  return `<h2 class="section-title">Recommended actions</h2><section class="card">${nc ? `<p class="nochange">${esc(nc)}</p>` : ''}${items.length ? `<ul class="findings actions">${items.slice(0, 5).map(actionItem).join('')}</ul>` : ''}</section>`;
+}
+const LEVEL = {
+  day: (r) => `Based on ${r.n} full day${r.n === 1 ? '' : 's'} — enough for the daily pattern, not yet for trends.`,
+  days: (r) => `Based on ${r.n} days — early observations, marked preliminary.`,
+  weeks: (r) => `Based on ${r.n} days.`,
+  months: (r) => `Based on ${r.n} days, about ${Math.round(r.n / 30)} months.`,
+  partial: () => 'Less than one full day so far.',
+};
+/** The report: key numbers, what stands out, and the typical day, with the rest one tap away. */
+function learnedSection(r) {
+  const list = A.buildInsights({ state: S, temps: allTemps() });
+  const top = list.slice(0, 4), more = list.slice(4);
+  const pk = r.peak, nt = r.night;
+  const day = r.prof ? disclosure('typical-day', 'Your typical day, hour by hour', `<p class="fine">${esc(`Average use for each hour across ${r.hd.length} day${r.hd.length === 1 ? '' : 's'}.${pk ? ` The tallest bars, ${hourLabel(pk.start)}–${hourLabel(pk.end % 24)}, are your busiest hours.` : ''}${nt ? ` The lowest, around ${num(nt.base)} W, is what never switches off.` : ''}`)}</p>${barChart(r.prof, { label: 'Average electricity use by hour of day', ticks: r.prof.map((_, h) => hourLabel(h)), tips: r.prof.map((v, h) => `${hourLabel(h)}: ${num(v * 1000)} W average`) })}`) : '';
+  return `<h2 class="section-title">What we learned</h2><section class="card learned"><p class="fine">${esc(LEVEL[r.level](r))} Calculated on this device.</p><div class="stats">${r.facts.map((f) => `<div class="stat"><b>${esc(f.v)}</b><span>${esc(f.l)}</span></div>`).join('')}</div>${findingUl(top)}${more.length ? disclosure('more-findings', `${more.length} more finding${more.length === 1 ? '' : 's'}`, findingUl(more)) : ''}${day}</section>`;
+}
+function cantTell(r) {
+  const item = (c) => `<li class="${c.ok ? 'done' : ''}"><span class="mark">${c.ok ? '✓' : '·'}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`;
+  return disclosure('cant-tell', 'What’s possible now, and what isn’t yet', `<ol class="checklist">${r.comparisons.map(item).join('')}</ol><p class="card-label">Can’t be determined yet</p><ul class="bullets">${r.cannot.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>`);
+}
+/** Compact Today card once there is electricity data: the best discovery and the best next step. */
+function learnedToday() {
+  if (!usageDays().length) return '';
+  const r = report(), top = r.findings.find((f) => f.key !== 'stale') || r.findings[0];
+  const ops = actionsFor(r), best = ops.find((o) => o.confidence !== 'info'), nc = A.noChangeSummary(r, ops);
+  const next = best ? `<div class="next"><p class="card-label">Best next step · ${esc(CONF[best.confidence])}</p><b>${esc(best.what)}</b><p class="fine">${esc(best.impact || best.why)}</p>${best.apply ? applyBtn(best) : ''}</div>` : nc ? `<p class="fine">${esc(nc)}</p>` : '';
+  return `<section class="card learned"><p class="card-label">What we learned from your electricity data</p>${top ? `<h2>${esc(top.title)}</h2><p>${esc(top.detail)}</p>` : `<h2>${esc(r.facts.map((f) => `${f.v} ${f.l}`).slice(0, 2).join(' · '))}</h2>`}${next}<a class="btn plain" href="#insights">See your full report ›</a></section>`;
 }
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
 
@@ -306,16 +336,16 @@ function viewInsights() {
     out.push(`<section class="card"><h2>See what’s actually working</h2><p>Import your Delmarva usage file. It’s analyzed on this device and matched with Wilmington weather automatically.</p>${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}</section>`);
     out.push(disclosure('howto', 'How to get the file from Delmarva', HOW_TO_DOWNLOAD, true));
     out.push(`<h2 class="section-title">Automatic weather review</h2><section class="card">${findingsList()}</section>`);
-    out.push(actionsCard());
     out.push(`<div class="grid">${weatherLink()}</div>`);
     return out.join('');
   }
-  const tr = usageTrend(), sw = A.similarWeather(S.usage, allTemps()), dq = A.dataQuality(S.usage, allTemps(), todayIso());
-  const swStat = sw.status === 'ok' ? `<div class="stat"><b>${signed(sw.pct, 0)}%</b><span>vs. ${sw.matched} earlier days with similar weather</span></div>` : '';
-  out.push(`<section class="card"><div class="stats"><div class="stat"><b>${num(tr.avg, 1)}</b><span>kWh a day, last ${tr.days} days</span></div>${tr.pct == null ? '' : `<div class="stat"><b>${signed(tr.pct, 0)}%</b><span>vs. the 30 days before</span></div>`}${swStat}</div><p class="fine">${tr.pct == null ? 'A month-to-month comparison appears once you have about two months of data. ' : ''}${sw.status === 'ok' ? `Similar weather: the last ${sw.n} days vs. earlier days within ${sw.tol}°F, same weekday/weekend mix — ${sw.meaningful ? 'a real difference' : 'within normal variation'}. ` : ''}The Savings page adjusts for weather.</p></section>`);
-  out.push(`<h2 class="section-title">What we found</h2><section class="card">${findingsList()}</section>`);
-  out.push(actionsCard());
-  out.push(`<section class="card ${dq.status === 'attention' ? 'warn' : ''}"><p class="card-label">${dq.status === 'attention' ? '<i class="dot"></i>' : ''}Data coverage</p><ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>`);
+  const r = report(), dq = A.dataQuality(S.usage, allTemps(), todayIso());
+  if (lastImport) out.push(`<section class="card good imported"><p class="card-label"><i class="dot"></i>Import complete</p><p>${esc(lastImport)}</p></section>`);
+  out.push(learnedSection(r));
+  out.push(actionsCard(r));
+  out.push(cantTell(r));
+  out.push(`<h2 class="section-title">Automatic weather review</h2><section class="card">${findingsList()}<p class="fine">Public weather data reviewed by the cloud AI operator. It never sees your electricity data; any “for your home” line is calculated on this device.</p></section>`);
+  out.push(dq.status === 'attention' ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Data coverage</p><ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>` : disclosure('coverage', 'Data coverage', `<ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>`));
   const sv = savings();
   const svLine = { likely_savings: `About ${num(sv.weather?.pct, 0)}% less than expected`, likely_increase: 'Use is up since the change', inconclusive: 'No clear change yet', insufficient: 'Collecting enough days', no_change_date: 'Starts when you program the thermostat' }[sv.status] || 'Savings';
   out.push(`<h2 class="section-title">Details</h2><div class="grid three">
@@ -807,7 +837,13 @@ async function importUsage(files) {
   save();
   const days = usageDays(), temps = allTemps();
   const matched = days.filter((d) => Number.isFinite(temps[d.date])).length;
-  toast(`${msgs.map((m) => m.replace(/\.$/, '')).join('. ')}.${!bad && days.length ? ` ${matched} days matched with weather. Insights updated.` : ''}`, bad && msgs.length === 1);
+  const msg = `${msgs.map((m) => m.replace(/\.$/, '')).join('. ')}.${!bad && days.length ? ` ${matched} day${matched === 1 ? '' : 's'} matched with weather.` : ''}`;
+  toast(bad ? msg : `${msg} Your report is ready.`, bad && msgs.length === 1);
+  if (msgs.length > (bad ? 1 : 0) && days.length) {
+    lastImport = msg;
+    if (route() !== 'insights') location.hash = 'insights';
+    window.scrollTo(0, 0);
+  }
   archiveTried = false;
   fillArchive();
   busy = '';

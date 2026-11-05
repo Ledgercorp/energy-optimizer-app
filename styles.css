@@ -341,3 +341,9 @@ kbd.key { display: inline-flex; align-items: center; justify-content: center; mi
 td small { display: block; color: var(--ink-3); font-size: 12px; font-weight: 400; }
 .findings span i { font-style: normal; font-weight: 600; color: var(--ink); }
 .actions .btn { margin-top: 10px; }
+.learned .next { margin-top: 14px; padding-top: 12px; border-top: .5px solid var(--line); }
+.learned .next b { display: block; font-size: 16px; font-weight: 650; }
+.learned .next .btn { margin-top: 10px; }
+.learned > .btn.plain { margin-top: 10px; }
+.nochange { margin-bottom: 8px; }
+.learned .stats + .findings { margin-top: 16px; }
