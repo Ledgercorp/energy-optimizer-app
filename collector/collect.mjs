@@ -4,6 +4,7 @@
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { parseNwsHourly } from '../core.js';
 import * as W from '../weather.js';
+import { checkInsights } from './insights.mjs';
 
 const DIR = new URL('../data/weather/', import.meta.url);
 const UA = '(energy-optimizer-app weather collector, github.com/Ledgercorp/energy-optimizer-app)';
@@ -82,6 +83,13 @@ try {
     lastSnapshotAt = iso(now);
   }
 } catch (e) { errors.push(`NWS forecast: ${e.message}`); }
+
+// ---- operator insights (delivered by the aeo-operator Worker as a workflow input; validated again here) ----
+if (process.env.INSIGHTS) {
+  const r = checkInsights(process.env.INSIGHTS);
+  if (r.ok) await writeIfChanged('insights.json', `${JSON.stringify(r.value, null, 1)}\n`);
+  else errors.push(`insights rejected: ${r.error}`);
+}
 
 // ---- aggregates ----
 const snapshots = {};
