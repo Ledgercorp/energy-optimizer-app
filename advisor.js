@@ -62,6 +62,28 @@ export function programSteps(plans) {
   return steps;
 }
 
+/** What changed between the programmed schedule (its fingerprint) and the current recommendation, in plain words. */
+export function scheduleDiff(fingerprint, plans) {
+  let old;
+  try { old = JSON.parse(fingerprint); } catch { return []; }
+  if (!Array.isArray(old)) return [];
+  const word = (m) => (m === 'heat' ? 'Heating' : 'Cooling');
+  const out = [];
+  for (const pl of plans) {
+    const o = old.find((x) => x[0] === pl.mode);
+    if (!o) { out.push(`${word(pl.mode)} schedule is new (the building season changed)`); continue; }
+    [['weekday', 'Weekdays', 1], ['weekend', 'Weekends', 2]].forEach(([k, label, idx]) => {
+      pl[k].forEach((d, i) => {
+        const [os, ot] = o[idx]?.[i] || [];
+        if (os !== d.start) out.push(`${label} ${d.name.toLowerCase()} now starts ${C.fmtMin(d.start)} (was ${os == null ? '—' : C.fmtMin(os)})`);
+        if (ot !== d.temp) out.push(`${label} ${d.name.toLowerCase()}: ${d.temp}° (was ${ot ?? '—'}°)`);
+      });
+    });
+  }
+  for (const o of old) if (!plans.some((p) => p.mode === o[0])) out.push(`${word(o[0])} schedule is no longer needed`);
+  return out.length > 4 ? [...out.slice(0, 3), `and ${out.length - 3} more changes`] : out;
+}
+
 /** If the forecast suggests the building may have switched seasons, return the season to ask about. */
 export function seasonHint(profile, outlook) {
   const d = outlook.filter((x) => x.hours >= 20).slice(0, 3);
