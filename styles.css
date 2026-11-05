@@ -336,3 +336,8 @@ kbd.key { display: inline-flex; align-items: center; justify-content: center; mi
   details { display: block; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Phase 3: numbers breakdown and recommended actions */
+td small { display: block; color: var(--ink-3); font-size: 12px; font-weight: 400; }
+.findings span i { font-style: normal; font-weight: 600; color: var(--ink); }
+.actions .btn { margin-top: 10px; }

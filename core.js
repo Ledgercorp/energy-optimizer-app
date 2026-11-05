@@ -322,9 +322,11 @@ export function importUsageCsv(text) {
     const kwh = parseNum(r[iUse]);
     if (iUnits >= 0 && r[iUnits] && !/kwh/i.test(r[iUnits])) { skipped++; continue; }
     if (!date || !Number.isFinite(kwh) || kwh < 0 || kwh > 500) { skipped++; continue; }
-    const hour = parseHour(iStart >= 0 ? r[iStart] : r[iDate]);
+    const tcell = iStart >= 0 ? r[iStart] : r[iDate];
+    const hour = parseHour(tcell);
     const cost = iCost >= 0 ? parseNum(r[iCost]) : NaN;
-    records.push({ date, hour, kwh, cost: Number.isFinite(cost) ? cost : null });
+    const min = hour == null ? '' : /:(\d{2})/.exec(tcell)[1];
+    records.push({ date, hour, kwh, cost: Number.isFinite(cost) ? cost : null, slot: hour == null ? date : `${date}T${hour}:${min}` });
   }
   if (!records.length) throw new Error(`No valid usage rows found (${skipped} rows could not be read).`);
   return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily' };
@@ -350,14 +352,38 @@ export function importGreenButton(xml) {
     if (!Number.isFinite(start) || !Number.isFinite(val) || val < 0) { skipped++; continue; }
     const { date, hour } = localParts(start * 1000);
     const cost = xmlTag(b, 'cost');
-    records.push({ date, hour: dur > 3600 ? null : hour, kwh: (val * 10 ** mult) / 1000, cost: cost != null && Number.isFinite(+cost) ? +cost / 100000 : null });
+    records.push({ date, hour: dur > 3600 ? null : hour, kwh: (val * 10 ** mult) / 1000, cost: cost != null && Number.isFinite(+cost) ? +cost / 100000 : null, slot: `@${start}` });
   }
   if (!records.length) throw new Error('The Green Button file had no readable interval readings.');
   return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: uom == null };
 }
 
 export function importUsageFile(name, text) {
-  return /\.xml$/i.test(name) || /^\s*<\?xml|<feed/i.test(text) ? importGreenButton(text) : importUsageCsv(text);
+  const res = /\.xml$/i.test(name) || /^\s*<\?xml|<feed/i.test(text) ? importGreenButton(text) : importUsageCsv(text);
+  return { ...res, ...cleanRecords(res.records) };
+}
+
+/** First Sunday of November: the 1 AM hour happens twice (US daylight-saving fall-back). */
+export const isFallBackDate = (iso) => iso.slice(5, 7) === '11' && +iso.slice(8, 10) <= 7 && new Date(`${iso}T12:00:00Z`).getUTCDay() === 0;
+
+/**
+ * Drop readings a file repeats (e.g. two exports pasted together). Each reading has a slot — its exact start
+ * (date + clock time, or the Green Button epoch second). A slot appears once, except the CSV 1 AM slot on the
+ * DST fall-back day, which legitimately appears twice. Extra copies are removed and reported:
+ * identical values as duplicates, different values as conflicts (the first reading is kept).
+ */
+export function cleanRecords(records) {
+  const seen = new Map(), out = [], conflicts = new Set();
+  let duplicates = 0;
+  for (const r of records) {
+    const k = r.slot ?? `${r.date}T${r.hour ?? ''}`;
+    const prev = seen.get(k) || [];
+    const allowed = r.hour === 1 && isFallBackDate(r.date) && !k.startsWith('@') ? 2 : 1;
+    if (prev.length < allowed) { prev.push(r.kwh); seen.set(k, prev); out.push(r); }
+    else if (prev.includes(r.kwh)) duplicates++;
+    else conflicts.add(r.date);
+  }
+  return { records: out, duplicates, conflicts: [...conflicts].sort() };
 }
 
 /** Merge imported records into stored usage. Re-importing the same file replaces values instead of doubling them. */
@@ -448,17 +474,18 @@ function solve(A, b) {
 const variance = (a) => { const m = avg(a); return avg(a.map((v) => (v - m) ** 2)); };
 
 /** Ordinary least squares: kWh/day = a + b·HDD + c·CDD (terms without variation are dropped). */
-export function fitBaseline(points) {
+export function fitBaseline(points, cand = ['hdd', 'cdd']) {
   if (points.length < 3) return null;
-  const feats = ['hdd', 'cdd'].filter((f) => variance(points.map((p) => p[f])) > 0.25);
-  const X = points.map((p) => [1, ...feats.map((f) => p[f])]);
+  // Degree-day terms need real spread; the weekend indicator (0/1) only needs both kinds of day present.
+  const feats = cand.filter((f) => variance(points.map((p) => p[f] ?? 0)) > (f === 'wkend' ? 0.05 : 0.25));
+  const X = points.map((p) => [1, ...feats.map((f) => p[f] ?? 0)]);
   const y = points.map((p) => p.kwh);
   const k = X[0].length;
   const A = Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => sum(X.map((r) => r[i] * r[j]))));
   const b = Array.from({ length: k }, (_, i) => sum(X.map((r, n) => r[i] * y[n])));
   const coef = solve(A, b);
   if (!coef) return null;
-  const predict = (p) => coef[0] + feats.reduce((s, f, i) => s + coef[i + 1] * p[f], 0);
+  const predict = (p) => coef[0] + feats.reduce((s, f, i) => s + coef[i + 1] * (p[f] ?? 0), 0);
   const sse = sum(points.map((p) => (p.kwh - predict(p)) ** 2));
   const my = avg(y), sst = sum(y.map((v) => (v - my) ** 2));
   const ranges = Object.fromEntries(['hdd', 'cdd'].map((f) => [f, [Math.min(...points.map((p) => p[f])), Math.max(...points.map((p) => p[f]))]]));
@@ -466,27 +493,40 @@ export function fitBaseline(points) {
   // Standard errors from the diagonal of (XᵀX)⁻¹ · s².
   const inv = Array.from({ length: k }, (_, j) => solve(A, Array.from({ length: k }, (_, i) => (i === j ? 1 : 0))));
   const coefSE = inv.every(Boolean) ? inv.map((col, j) => Math.sqrt(Math.max(0, col[j])) * se) : null;
-  return { feats, coef, coefSE, se, n: points.length, r2: sst > 0 ? 1 - sse / sst : 0, predict, ranges };
+  // Variance of a summed prediction over many days: x̄ᵀ(XᵀX)⁻¹x̄·s², where x̄ is the summed feature row.
+  const predVar = (rows) => {
+    if (!inv.every(Boolean)) return 0;
+    const xs = Array.from({ length: k }, (_, i) => sum(rows.map((p) => (i === 0 ? 1 : p[feats[i - 1]] ?? 0))));
+    return Math.max(0, sum(xs.map((a, i) => a * sum(xs.map((b, j) => inv[j][i] * b))))) * se * se;
+  };
+  return { feats, coef, coefSE, se, n: points.length, r2: sst > 0 ? 1 - sse / sst : 0, predict, predVar, ranges };
 }
 
-export function evaluateSavings({ usage, temps, changeDate, tariff }) {
+/**
+ * Weather-adjusted comparison. Baseline: up to a year of complete days before `baselineEnd` (default: the change date),
+ * modelled as kWh/day = a + b·HDD + c·CDD + d·weekend. Comparison window: `changeDate` up to (not including) `endDate`.
+ */
+export function evaluateSavings({ usage, temps, changeDate, tariff, endDate = '', baselineEnd = '' }) {
   if (!changeDate) return { status: 'no_change_date', message: 'Set the date you started following the new schedule.' };
+  const bEnd = baselineEnd || changeDate;
+  const yearBefore = new Date(Date.parse(`${bEnd}T12:00:00Z`) - 365 * 864e5).toISOString().slice(0, 10);
   const days = dailyTotals(usage)
     .filter((d) => d.complete && Number.isFinite(temps?.[d.date]))
-    .map((d) => ({ ...d, ...degreeDays(temps[d.date]) }));
-  const before = days.filter((d) => d.date < changeDate), after = days.filter((d) => d.date >= changeDate);
+    .map((d) => ({ ...d, ...degreeDays(temps[d.date]), wkend: isWeekendDate(d.date) ? 1 : 0 }));
+  const before = days.filter((d) => d.date < bEnd && d.date >= yearBefore), after = days.filter((d) => d.date >= changeDate && (!endDate || d.date < endDate));
   if (before.length < 14 || after.length < 7) {
     return { status: 'insufficient', before: before.length, after: after.length, message: `Need at least 14 days before and 7 days after the change with both usage and outdoor temperature (have ${before.length} and ${after.length}).` };
   }
-  const model = fitBaseline(before);
+  const model = fitBaseline(before, ['hdd', 'cdd', 'wkend']);
   if (!model) return { status: 'insufficient', before: before.length, after: after.length, message: 'The baseline period could not be modelled.' };
   const predicted = sum(after.map(model.predict)), actual = sum(after.map((d) => d.kwh)), diff = predicted - actual;
-  // ponytail: 95% band from residual error only (ignores coefficient uncertainty and day-to-day autocorrelation), so it is optimistic. Upgrade: bootstrap residuals.
-  const unc = 1.96 * model.se * Math.sqrt(after.length);
+  // 95% band: day-to-day noise plus baseline-coefficient uncertainty.
+  // ponytail: ignores autocorrelation between neighbouring days, so it is still somewhat optimistic. Upgrade: block bootstrap.
+  const unc = 1.96 * Math.sqrt(model.se ** 2 * after.length + model.predVar(after));
   const status = diff > unc ? 'likely_savings' : diff < -unc ? 'likely_increase' : 'inconclusive';
   const rate = energyCost(1, tariff);
   const caveats = ['Weather-adjusted comparison, not proof of cause: guests, new appliances, travel or building changes also move usage.'];
-  const outside = after.filter((d) => model.feats.some((f) => d[f] < model.ranges[f][0] - 2 || d[f] > model.ranges[f][1] + 2)).length;
+  const outside = after.filter((d) => model.feats.filter((f) => f !== 'wkend').some((f) => d[f] < model.ranges[f][0] - 2 || d[f] > model.ranges[f][1] + 2)).length;
   if (outside) caveats.push(`${outside} day(s) after the change were colder or hotter than anything in the baseline, so the model is extrapolating.`);
   if (model.r2 < 0.3) caveats.push('Outdoor temperature explains little of your baseline usage, so HVAC may be a small share of this meter.');
   return {
