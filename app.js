@@ -13,6 +13,7 @@ const SUPPORT_URL = 'https://energywiserewards.delmarva.com/de/contact/';
 const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const STANDALONE = navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)').matches;
 const HOUR = Wx.HOUR;
+const API = 'https://aeo-public.colbyweiss15.workers.dev/data/weather/'; // read-only Cloudflare weather service; the GitHub Pages copy is the fallback
 const SEASONS = [['heat_available', 'Heat'], ['cool_available', 'Cooling'], ['fan_only', 'Fan only'], ['unknown', 'Not sure']];
 
 const $ = (s) => document.querySelector(s);
@@ -35,7 +36,7 @@ let S = load();
 let UI = loadUI();
 let WD = { loaded: false, status: null, daily: null, skill: null, latest: null, insights: null, obs: {} };
 let weatherErr = '', busy = '', lastRefresh = 0, archiveTried = false;
-let draft = null, setupStep = 0, progStep = 0;
+let draft = null, setupStep = 0, progStep = 0, scrollTarget = null;
 
 function load() {
   let raw = null;
@@ -326,9 +327,10 @@ function viewSettings() {
     ${group('Electric rate', `${numItem('profile.tariff.centsPerKwh', 'Energy charge ¢/kWh', 'min="0" max="100" step="0.01"')}<label class="item"><span>Confirmed on my bill</span><input type="checkbox" data-k="profile.tariff.confirmed" data-rerender ${p.tariff.confirmed ? 'checked' : ''}></label>`, 'Dollar figures stay hidden until a rate is confirmed. No rate is ever assumed.')}
     ${group('Thermostat notes', `<div class="item col"><p class="fine">Optional: jot down what the display shows. These are notes, never treated as the live state of the thermostat.</p><div class="fields"><label>Room °F<input type="number" id="o-room" inputmode="numeric" min="40" max="100"></label><label>Setpoint °F<input type="number" id="o-set" inputmode="numeric" min="40" max="100"></label><label>Display<select id="o-hold"><option value="none">SET AT</option><option value="hold">HOLD AT</option></select></label><label>Note<input type="text" id="o-note" maxlength="120"></label></div><button class="btn secondary" data-act="add-obs">Save note</button></div>${obs.map((o) => `<div class="item"><span>${num(o.roomF)}° room · ${o.hold !== 'none' ? 'HOLD AT' : 'SET AT'} ${num(o.setF)}°<small>${esc(new Date(o.ts).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }))}${o.note ? ` · ${esc(o.note)}` : ''}</small></span><button class="btn plain" data-act="del-obs" data-ts="${o.ts}" aria-label="Delete note">Delete</button></div>`).join('')}`)}
     ${group('Thermostat control', `<div class="item col"><p>Not available. This app only recommends; it never sends anything to the thermostat. A verified, authorized connection would be a separate future project needing your approval.</p><details class="inline"><summary>Ask Delmarva about remote programming</summary><p class="fine">Use the <a href="${SUPPORT_URL}" target="_blank" rel="noopener noreferrer">contact form</a> or call 866-353-5799:</p><pre class="msg">${esc(SUPPORT_MSG)}</pre><button class="btn secondary" data-act="copy-support">Copy message</button></details><p class="fine">Programming steps follow Delmarva’s <a href="${MANUAL_URL}" target="_blank" rel="noopener noreferrer">thermostat manual</a>.</p></div>`)}
-    ${group('Privacy', '<div class="item col"><p class="fine">Your settings, notes and electricity data stay in this app on this device. The public website only serves the app and city-level weather. Forecasts come from the National Weather Service; older daily temperatures may come from Open-Meteo, which receives only the city location and dates.</p></div>')}
+    ${group('Privacy', '<div class="item col"><p class="fine">Your settings, notes and electricity data stay in this app on this device. The public website only serves the app; a read-only Cloudflare service supplies city-level weather and general weather notes, and never receives your data. Forecasts come from the National Weather Service; older daily temperatures may come from Open-Meteo, which receives only the city location and dates.</p></div>')}
     <button class="btn danger" data-act="erase">Erase everything on this device</button>`;
-  return `${title('Settings')}
+  const routine = A.todayStatus(S, recNow());
+  return `${title('Settings')}<p class="note" role="alert" id="routine-alert"${routine.kind === 'error' ? '' : ' hidden'}>${routine.kind === 'error' ? esc(routine.message) : ''}</p>
     ${group('Apartment', `<div class="item col"><span>What the building provides right now</span>${seasonPicker('')}</div><a class="item link" href="#setup">Redo quick setup</a>`)}
     ${group('Comfort at home', `${modes.includes('heat') || p.buildingMode === 'unknown' ? stepper('profile.comfort.heat.home', 'Heat to') : ''}${modes.includes('cool') || p.buildingMode === 'unknown' ? stepper('profile.comfort.cool.home', 'Cool to') : ''}${p.buildingMode === 'fan_only' ? '<div class="item"><span>No heating or cooling to set</span></div>' : ''}`, 'Away and sleep temperatures move with these automatically.')}
     ${group('Weekdays', `${timeItem('profile.routine.weekday.wake', 'Wake up')}${timeItem('profile.routine.weekday.leave', 'Leave home')}${timeItem('profile.routine.weekday.back', 'Back home')}${timeItem('profile.routine.weekday.sleep', 'Bedtime')}`, 'Clear Leave/Back if someone is home all day.')}
@@ -450,7 +452,8 @@ async function fetchJson(url) {
 
 /** Public weather history published next to the app by the hourly cloud collector (works offline once cached). */
 async function loadWeather() {
-  const get = async (f) => { try { const r = await fetch(`data/weather/${f}`, { cache: 'no-cache' }); return r.ok ? await r.json() : null; } catch { return null; } };
+  const one = async (u) => { try { const r = await fetch(u, { cache: 'no-cache', signal: AbortSignal.timeout(10e3) }); return r.ok ? await r.json() : null; } catch { return null; } };
+  const get = async (f) => (await one(API + f)) ?? one(`data/weather/${f}`);
   const months = [...new Set([0, 4].map((d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 7)))];
   const [status, daily, skill, latest, insights, ...obs] = await Promise.all([get('status.json'), get('daily.json'), get('skill.json'), get('forecast/latest.json'), get('insights.json'), ...months.map((m) => get(`obs/${m}.json`))]);
   WD = { loaded: true, status, daily, skill, latest, insights, obs: Object.assign({}, ...obs.filter(Boolean)) };
@@ -579,7 +582,7 @@ function showTip(el, select) {
 
 document.addEventListener('click', (e) => {
   const open = e.target.closest('[data-open]');
-  if (open) { UI.open = { ...UI.open, [open.dataset.open]: true }; saveUI(); }
+  if (open) { UI.open = { ...UI.open, [open.dataset.open]: true }; saveUI(); scrollTarget = open.dataset.open; }
   const el = e.target.closest('[data-act]');
   if (el && ACTIONS[el.dataset.act]) {
     if (el.tagName !== 'A') e.preventDefault();
@@ -643,6 +646,10 @@ document.addEventListener('change', async (e) => {
   setPath(S, k, v);
   save();
   if ('rerender' in el.dataset && el.type !== 'time' && el.type !== 'number') render();
+  if (el.type === 'time') { // re-check the routine without re-rendering (keeps the time picker open)
+    const a = $('#routine-alert'), st = A.todayStatus(S, recNow());
+    if (a) { a.hidden = st.kind !== 'error'; a.textContent = st.kind === 'error' ? st.message : ''; }
+  }
 });
 
 $('#nav').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}"><svg viewBox="0 0 24 24" aria-hidden="true" class="ic">${ICON[k]}</svg><span>${l}</span></a>`).join('');
@@ -652,6 +659,7 @@ window.addEventListener('hashchange', () => {
   if (r === 'program') progStep = 0; // guided programming always starts from the first screen
   render();
   window.scrollTo(0, 0);
+  if (scrollTarget) { document.querySelector(`details[data-id="${scrollTarget}"]`)?.scrollIntoView({ block: 'start' }); scrollTarget = null; }
 });
 const visible = () => document.visibilityState === 'visible';
 document.addEventListener('visibilitychange', () => { if (visible() && Date.now() - lastRefresh > 10 * 60e3) refreshAll(); });
