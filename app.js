@@ -33,7 +33,7 @@ const modeWord = (m) => (m === 'heat' ? 'Heat' : 'Cool');
 
 let S = load();
 let UI = loadUI();
-let WD = { loaded: false, status: null, daily: null, skill: null, latest: null, obs: {} };
+let WD = { loaded: false, status: null, daily: null, skill: null, latest: null, insights: null, obs: {} };
 let weatherErr = '', busy = '', lastRefresh = 0, archiveTried = false;
 let draft = null, setupStep = 0, progStep = 0;
 
@@ -70,6 +70,8 @@ const allTemps = () => ({ ...S.temps, ...Wx.dailyMeans(WD.daily) });
 const forecastHours = () => (S.weatherCache?.hours?.length ? S.weatherCache.hours : (WD.latest?.hours || []).map((h) => ({ t: Date.parse(h.k), tempF: h.t, text: h.text, pop: h.pop })));
 const recNow = () => C.recommend(S, forecastHours(), Date.now());
 const usageDays = () => C.dailyTotals(S.usage).filter((d) => d.complete);
+/** Validated weather insights from the background operator (public data only; advice, never the schedule itself). */
+const opsItems = () => (WD.insights?.items || []).filter((i) => Date.parse(i.valid_until) > Date.now());
 
 // ---------- charts ----------
 
@@ -197,6 +199,8 @@ function viewToday() {
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     out.push(`<section class="banner"><p>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</p><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
   }
+  const ops = opsItems()[0];
+  if (ops && st.kind !== 'setup') out.push(`<a class="rowcard" href="#insights" data-open="ops"><div class="rc-main"><b>${esc(ops.title)}</b><span>${esc(ops.detail)}</span></div></a>`);
   out.push(weatherLine(rec));
   const tip = rec.outlook[0]?.tips?.[0];
   if (tip && st.kind !== 'setup') out.push(`<p class="tip"><b>Tip</b> ${esc(tip)}</p>`);
@@ -210,6 +214,14 @@ function viewToday() {
 }
 
 // ---------- Insights ----------
+
+function opsBody() {
+  const ins = WD.insights;
+  if (!ins?.generatedAt) return `<p class="fine">${WD.loaded ? 'The automated weather review hasn’t published anything yet.' : 'Loading…'}</p>`;
+  const items = opsItems();
+  return `${items.length ? `<ul class="findings">${items.map((x) => `<li class="${esc(x.tone)}"><b>${esc(x.title)}</b><span>${esc(x.detail)}${x.action ? ` ${esc(x.action)}` : ''}</span></li>`).join('')}</ul>` : '<p class="fine">Nothing in the forecast needs your attention right now.</p>'}
+    <p class="fine">Checked ${esc(ago(Date.parse(ins.generatedAt)))} by an automated review of public weather and utility information. It never sees your electricity data or controls the thermostat; your schedule always comes from your own settings.</p>${ins.maintenance ? `<p class="note">${esc(ins.maintenance)}</p>` : ''}`;
+}
 
 function weatherBody() {
   const st = WD.status;
@@ -286,6 +298,7 @@ function viewInsights() {
     out.push(disclosure('use', 'Electricity use', electricityBody()));
     out.push(disclosure('temp', 'Electricity and outdoor temperature', temperatureBody()));
   }
+  out.push(disclosure('ops', 'Weather intelligence', opsBody()));
   out.push(disclosure('weather', 'Weather history and forecast', weatherBody()));
   if (days.length) {
     out.push(disclosure('savings', 'Savings details', savingsBody()));
@@ -439,8 +452,8 @@ async function fetchJson(url) {
 async function loadWeather() {
   const get = async (f) => { try { const r = await fetch(`data/weather/${f}`, { cache: 'no-cache' }); return r.ok ? await r.json() : null; } catch { return null; } };
   const months = [...new Set([0, 4].map((d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 7)))];
-  const [status, daily, skill, latest, ...obs] = await Promise.all([get('status.json'), get('daily.json'), get('skill.json'), get('forecast/latest.json'), ...months.map((m) => get(`obs/${m}.json`))]);
-  WD = { loaded: true, status, daily, skill, latest, obs: Object.assign({}, ...obs.filter(Boolean)) };
+  const [status, daily, skill, latest, insights, ...obs] = await Promise.all([get('status.json'), get('daily.json'), get('skill.json'), get('forecast/latest.json'), get('insights.json'), ...months.map((m) => get(`obs/${m}.json`))]);
+  WD = { loaded: true, status, daily, skill, latest, insights, obs: Object.assign({}, ...obs.filter(Boolean)) };
 }
 
 async function refreshForecast() {
