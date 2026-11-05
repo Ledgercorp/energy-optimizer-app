@@ -132,7 +132,9 @@ export function buildDay(r, sp, recoveryMin = 30) {
   const wake = toMin(r.wake), sleep = toMin(r.sleep), leave = toMin(r.leave), back = toMin(r.back);
   if (wake == null || sleep == null) throw new Error('Wake and bedtime are required (HH:MM).');
   const rec = Math.max(0, Math.min(120, Number(recoveryMin) || 0));
-  const away = leave != null && back != null && back > leave;
+  if ((leave == null) !== (back == null)) throw new Error('Set both “Leave home” and “Back home”, or clear both if someone is home all day.');
+  if (leave != null && back <= leave) throw new Error('“Back home” must be later than “Leave home” (24-hour times, e.g. 17:30).');
+  const away = leave != null && back != null;
   // Start Morning/Evening a little early so the room is comfortable when you need it.
   const starts = away
     ? [wake - rec, leave, back - rec, sleep]
