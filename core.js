@@ -374,10 +374,11 @@ export function importGreenButton(xml) {
   const records = [];
   for (const { rt: t, rows } of kept) {
     const hourly = rows.filter((r) => r.dur <= 3600 && r.val > 0).map((r) => r.val).sort((x, y) => x - y);
-    const typical = hourly.length ? hourly[hourly.length >> 1] : null;
+    const typical = hourly.length ? hourly[hourly.length >> 1] : null, peakVal = hourly.length ? hourly[hourly.length - 1] : null;
     const priced = rows.filter((r) => r.cost > 0 && r.val > 0);
     const price = (scale) => (priced.length ? priced.reduce((s, r) => s + r.cost, 0) / priced.reduce((s, r) => s + r.val * scale, 0) : null);
-    const ok = (scale) => (typical == null || (typical * scale >= 0.005 && typical * scale <= 25)) && (price(scale) == null || (price(scale) >= 0.03 && price(scale) <= 1));
+    // Physical check first: one hour can't exceed ~50 kWh on an apartment service (200 A × 240 V ≈ 48 kW). Price is a second check.
+    const ok = (scale) => (typical == null || (typical * scale >= 0.005 && typical * scale <= 25 && peakVal * scale <= 50)) && (price(scale) == null || (price(scale) >= 0.03 && price(scale) <= 1));
     const declared = 10 ** t.mult / 1000;
     const scale = [declared, 1 / 1000, 10 ** -t.mult / 1000].find(ok) ?? declared;
     if (scale !== declared) notes.push(`values read as watt-hours (the file’s ×10^${t.mult} scale tag doesn’t match its usage and costs)`);
@@ -388,6 +389,12 @@ export function importGreenButton(xml) {
     }
   }
   if (!records.length) throw new Error('The Green Button file had no readable interval readings.');
+  if (wallClock) {
+    // Wall-clock exports list 24 hours on every day, including the fall-back day, so the repeated 1 AM hour is not shown separately.
+    for (const d of [...new Set(records.filter((r) => isFallBackDate(r.date) && r.hour === 1).map((r) => r.date))]) {
+      if (records.filter((r) => r.date === d && r.hour === 1).length === 1) notes.push(`on ${d} (clocks fell back) the file lists one 1 AM hour, not two, so that day may be about an hour short`);
+    }
+  }
   return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: kept.some((x) => x.rt.uom == null), notes };
 }
 
