@@ -333,15 +333,25 @@ const LOCAL = ['127.0.0.1', 'localhost'].includes(location.hostname) && !!docume
 let companion = null; // {model, ollama, installed, busy} when served by the Mac companion
 const loadAI = () => { try { const v = JSON.parse(localStorage.getItem(AI_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
 const saveAI = (list) => { try { localStorage.setItem(AI_KEY, JSON.stringify(list.slice(-10))); } catch { toast('Couldn’t save the analysis on this device (storage full?).', true); } };
-const validReport = (r) => r && r.kind === 'aeo-ai-analysis' && r.version === 1 && r.analysis && Array.isArray(r.analysis.discoveries) && Array.isArray(r.analysis.recommendations) && Array.isArray(r.evidence);
+const validReport = (r) => r && r.version === 1 && ((r.kind === 'aeo-ai-analysis' && r.analysis && Array.isArray(r.analysis.discoveries) && Array.isArray(r.analysis.recommendations) && Array.isArray(r.evidence)) || (r.kind === 'aeo-decision' && r.decision && typeof r.decision.title === 'string'));
+/** The decision stage: top finding, next action, why, supporting measurements, secondary findings. */
+function decisionHtml(d, deep) {
+  const sec = (d.secondary || []).map((x) => `<li>${esc(x.title)} — about ${num(x.impact_kwh_month)} kWh a month</li>`).join('');
+  const assist = d.model ? (d.model.used ? `Prioritization assisted by ${esc(d.model.name)} (experimental decision model).` : `The experimental decision model (${esc(d.model.name)}) was consulted, but the tested rules decided${d.model.agreed_with_rules ? ' (it agreed)' : ' (it was not confident or not supported by the evidence)'}.`) : 'Prioritized by the app’s tested rules.';
+  return `<div class="decision"><p class="card-label">Highest priority</p><h3>${esc(d.title)}</h3><p>${esc(d.why)}${d.impact_kwh_month ? ` Measured: about ${num(d.impact_kwh_month)} kWh a month.` : ''}</p>
+    <p><i>Next:</i> ${esc(d.next)}</p>${(d.measurements || []).length ? `<ul class="bullets">${d.measurements.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
+    <p class="fine">${assist} ${deep ? 'Qwen then investigated this in depth (below).' : 'No deeper AI investigation was run.'}</p>
+    ${sec ? disclosure('ai-secondary', 'Other findings worth a look', `<ul class="bullets">${sec}</ul>`) : ''}</div>`;
+}
 const evIds = (ids) => `<span class="src">Evidence ${ids.map(esc).join(', ')}</span>`;
 function aiReportHtml(rp) {
+  if (rp.kind === 'aeo-decision') return `${decisionHtml(rp.decision, false)}<p class="fine">${esc(fmtNY(Date.parse(rp.created)))}${rp.imported ? ' · imported from a file' : ''}</p>`;
   const a = rp.analysis, s = rp.stats || {};
   const disc = a.discoveries.map((d) => `<li class="${d.type === 'hypothesis' ? 'hyp' : ''}"><b>${esc(d.title)}</b><span class="kind-tag">${d.type === 'hypothesis' ? 'Hypothesis — not confirmed' : 'Observation'}</span><span>${esc(d.detail)}</span>${evIds(d.evidence)}</li>`).join('');
   const recs = a.recommendations.map((r, i) => `<li><b>${i === 0 ? 'Most likely to matter: ' : ''}${esc(r.action)}</b><span>${esc(r.why)}</span>${r.verify ? `<span><i>How to confirm:</i> ${esc(r.verify)}</span>` : ''}<span><i>${CONF[r.confidence] || 'Confidence not stated'}.</i> ${r.thermostat ? 'Involves your thermostat settings.' : 'No thermostat change needed.'}</span>${evIds(r.evidence)}</li>`).join('');
   const ev = rp.evidence.map((e) => `<li><b>${esc(e.id)} · ${esc(e.tool.replace(/_/g, ' '))}${e.args && Object.keys(e.args).length ? ` (${esc(Object.values(e.args).join(', '))})` : ''}</b><code>${esc(JSON.stringify(e.result).slice(0, 600))}</code></li>`).join('');
   const rej = (rp.rejected || []).map((x) => `<li>${esc(x.title || x.kind)} — ${esc(x.why.join('; '))}</li>`).join('');
-  return `${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
+  return `${rp.decision ? decisionHtml(rp.decision, true) + '<hr>' : ''}${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
     ${disc ? `<p class="card-label">Discoveries</p><ul class="findings">${disc}</ul>` : '<p class="fine">No discoveries passed the evidence check.</p>'}
     ${recs ? `<p class="card-label">Recommended</p><ul class="findings actions">${recs}</ul>` : '<p class="fine">No recommendation passed the evidence check — nothing clearly worth changing.</p>'}
     ${a.next_checks.length ? `<p class="card-label">What to check next</p><ul class="bullets">${a.next_checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
@@ -355,25 +365,25 @@ function aiSection() {
   let head;
   if (LOCAL && companion?.installed) head = busy === 'ai'
     ? `<p><b>Investigating…</b> ${esc(companion.model)} is working through your data on this Mac. This usually takes 1–3 minutes; you can keep using the app.</p>`
-    : `<p>An AI model (${esc(companion.model)}) running on this Mac investigates your electricity data with the app’s tested measurements, then every claim is checked against that evidence. Nothing leaves this computer.</p>${has ? '<button class="btn primary" data-act="ai-run">Run AI investigation</button>' : '<p class="fine">Import your Delmarva file first.</p>'}`;
+    : `<p>An AI model (${esc(companion.model)}) running on this Mac investigates your electricity data with the app’s tested measurements, then every claim is checked against that evidence. Nothing leaves this computer.</p>${has ? `<div class="row2"><button class="btn secondary" data-act="ai-prioritize">What matters most? (seconds)</button><button class="btn primary" data-act="ai-run">Run AI investigation (about a minute)</button></div>` : '<p class="fine">Import your Delmarva file first.</p>'}`;
   else if (LOCAL && companion) head = `<p class="fine">${companion.ollama ? `The model ${esc(companion.model)} isn’t installed. In Terminal run: ollama pull ${esc(companion.model)}` : 'Ollama isn’t running. Open the Ollama app, then reload.'}</p>`;
   else head = '<p class="fine">AI investigations run on your Mac with the Energy companion (it keeps your data on that computer). Bring a finished analysis here with “Import AI analysis”.</p>';
-  const hist = list.length > 1 ? disclosure('ai-history', `Previous analyses (${list.length})`, `<ul class="bullets">${list.map((r, i) => `<li><button class="link" data-act="ai-show" data-i="${i}">${esc(fmtNY(Date.parse(r.created)))} · ${esc(r.model)}${r.imported ? ' · imported' : ''}</button>${i === idx ? ' (showing)' : ''}</li>`).join('')}</ul>`) : '';
+  const hist = list.length > 1 ? disclosure('ai-history', `Previous analyses (${list.length})`, `<ul class="bullets">${list.map((r, i) => `<li><button class="link" data-act="ai-show" data-i="${i}">${esc(fmtNY(Date.parse(r.created)))} · ${r.kind === 'aeo-decision' ? 'priority check' : esc(r.model)}${r.imported ? ' · imported' : ''}</button>${i === idx ? ' (showing)' : ''}</li>`).join('')}</ul>`) : '';
   const io = `<div class="row2">${rp ? '<button class="btn secondary" data-act="ai-export">Save analysis file</button>' : ''}<label class="btn secondary file">Import AI analysis<input type="file" id="ai-file" accept=".json,application/json"></label></div>`;
   return `<h2 class="section-title">AI analysis <span class="kind-chip">AI</span></h2><section class="card ai">${head}${rp ? `<hr>${aiReportHtml(rp)}` : ''}${hist}${io}</section>`;
 }
-async function runAI() {
+async function runAI(deep = true) {
   busy = 'ai';
   render();
   try {
-    const r = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: { ...S, weatherCache: null }, temps: allTemps(), outlook: recNow().outlook }) });
+    const r = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deep, state: { ...S, weatherCache: null }, temps: allTemps(), outlook: recNow().outlook }) });
     const j = await r.json();
     if (!r.ok || !validReport(j)) throw new Error(j.error || 'unexpected response');
     const list = loadAI();
     list.push(j);
     saveAI(list);
     UI.aiShown = undefined;
-    toast(`AI investigation done: ${j.analysis.discoveries.length} discoveries, ${j.analysis.recommendations.length} recommendations.`);
+    toast(j.kind === 'aeo-decision' ? `Top priority: ${j.decision.title}.` : `AI investigation done: ${j.analysis.discoveries.length} discoveries, ${j.analysis.recommendations.length} recommendations.`);
   } catch (e) {
     toast(`AI investigation failed: ${e.message}`, true);
   }
@@ -812,12 +822,13 @@ const ACTIONS = {
     toast(`${el.dataset.label} set to ${v}° (was ${was}°). Update the thermostat from Today to use it.`);
     render();
   },
-  'ai-run'() { if (busy !== 'ai') runAI(); },
+  'ai-run'() { if (busy !== 'ai') runAI(true); },
+  'ai-prioritize'() { if (busy !== 'ai') runAI(false); },
   'ai-show'(el) { UI.aiShown = Number(el.dataset.i); render(); },
   async 'ai-export'() {
     const list = loadAI(), rp = list[Math.min(UI.aiShown ?? list.length - 1, list.length - 1)];
     if (!rp) return;
-    const name = `energy-ai-analysis-${rp.created.slice(0, 10)}.json`;
+    const name = `energy-${rp.kind === 'aeo-decision' ? 'priority' : 'ai-analysis'}-${rp.created.slice(0, 10)}.json`;
     const file = new File([JSON.stringify(rp, null, 1)], name, { type: 'application/json' });
     if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(file), download: name });
