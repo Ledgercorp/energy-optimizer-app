@@ -259,7 +259,7 @@ function viewToday() {
   const st = A.todayStatus(S, rec);
   const inv = st.kind === 'setup' ? null : invNow();
   const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
-  const main = [hh, hero(st, rec), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), zonesCard(), programCard(st, rec)];
+  const main = [hh, hero(st, rec), st.kind === 'setup' ? '' : normalityCard(), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), st.kind === 'setup' ? '' : awayCards(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
@@ -331,7 +331,7 @@ function cantTell(r) {
 /** Compact Today card once there is electricity data: the best discovery and the best next step. */
 function learnedToday() {
   if (!usageDays().length) return '';
-  const r = report(), top = r.findings.find((f) => f.key !== 'stale') || r.findings[0];
+  const r = report(), top = r.findings.find((f) => f.key !== 'stale' && f.key !== 'baseline') || r.findings.find((f) => f.key !== 'baseline');
   const ops = actionsFor(r), best = ops.find((o) => o.confidence !== 'info'), nc = A.noChangeSummary(r, ops);
   const next = best ? `<div class="next"><p class="card-label">Best next step · ${esc(CONF[best.confidence])}</p><b>${esc(best.what)}</b><p class="fine">${esc(best.impact || best.why)}</p>${best.apply ? applyBtn(best) : ''}</div>` : nc ? `<p class="fine">${esc(nc)}</p>` : '';
   return `<section class="card learned"><p class="card-label">What we learned from your electricity data</p>${top ? `<h2>${esc(top.title)}</h2><p>${esc(top.detail)}</p>` : `<h2>${esc(r.facts.map((f) => `${f.v} ${f.l}`).slice(0, 2).join(' · '))}</h2>`}${next}<a class="btn plain" href="#insights">See your full report ›</a></section>`;
@@ -478,7 +478,8 @@ function viewInvestigate() {
     return `<li><b>${esc(a.title)}</b><div class="row2"><select data-action-status="${esc(a.id)}">${Object.entries(A.ACTION_STATUS).map(([k, l]) => `<option value="${k}" ${a.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select><label class="field">Started on<input type="date" data-action-start="${esc(a.id)}" value="${esc(a.start)}"></label></div>
       <span class="fine">${esc(ev.label)}${ev.diff != null ? ` (${ev.diff < 0 ? '' : '+'}${num(ev.diff, 1)} kWh a day ± ${num(ev.unc, 1)}; ${esc(ev.method)})` : ''}</span></li>`;
   }).join('');
-  return `${head}
+  const sup = inv.supersedes ? `<section class="card"><p class="card-label">Revised conclusion</p><p>${esc(inv.supersedes.text)}</p><p class="fine">${inv.answered.length ? `Your ${inv.answered.length} earlier answer${inv.answered.length === 1 ? '' : 's'} (below) are kept and still count.` : 'Nothing you entered was removed.'}</p></section>` : '';
+  return `${head}${sup}
     <section class="card investigation"><h2>${esc(inv.headline)}</h2><p class="card-label">What we know (measured)</p><ul class="bullets">${inv.known.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>${att}</section>
     <h2 class="section-title">What might explain it</h2><section class="card"><ul class="findings explain">${hyps}</ul><p class="fine">${esc(inv.conclusion)} Whole-home readings can rule explanations in or out; they can’t name a specific appliance.</p></section>
     ${reask || inv.question ? `<section class="card">${questionHtml(inv, reask || inv.question, reask ? inv.answered.find((a) => a.q === reask.id)?.value : null)}</section>` : ''}
@@ -555,6 +556,62 @@ function viewRestore() {
     <p class="fine">A copy of this device’s data is saved first; you can undo from Settings. <button class="link" data-act="restore-replace">Replace everything with this backup instead…</button></p></section>`;
 }
 
+
+// ---------- Is this normal for you? · empty-apartment hours · bills ----------
+
+const BL_CLASS = { typical: 'good', return_to_typical: 'good', unusually_low: '', unusually_high: 'warn', insufficient: '' };
+const SURE = { high: 'High', medium: 'Moderate', low: 'Low' };
+/** The one message to understand first: is the latest use typical, unusually high or low, for THIS household. */
+function normalityCard(full = false) {
+  if (!usageDays().length) return '';
+  const r0 = report(), b = r0.baseline;
+  if (!b || (b.status === 'insufficient' && r0.n < 14)) return '';
+  const bv = A.billView({ state: S });
+  const t = bv.thirty;
+  const billLine = t ? `Latest 30 days: ${num(t.latest.kwh)} kWh (any 30 days in your data: ${num(t.low_kwh)}–${num(t.high_kwh)}). ${bv.statements.length ? 'Statements you entered are on the bill page.' : 'About ' + money(t.latest.cost) + ' by the file’s per-hour costs — an estimate, not a bill.'}` : '';
+  const lines = full ? b.lines : b.lines.slice(0, 1);
+  const wins = full && b.windows?.length ? `<div class="table-wrap"><table><thead><tr><th>Part of the day</th><th class="t">Now</th><th class="t">Usual</th><th></th></tr></thead><tbody>${b.windows.map((w) => `<tr><td>${esc(w.name.replace(/ \(.*/, ''))}</td><td class="t">${num(w.recent_w)} W</td><td class="t">${num(w.low_w)}–${num(w.high_w)} W</td><td>${w.flag === 'high' ? 'Highest yet' : w.flag === 'low' ? 'Lower' : 'Usual'}</td></tr>`).join('')}</tbody></table></div>` : '';
+  return `<section class="card normality ${BL_CLASS[b.status]}"><p class="card-label"><i class="dot"></i>Is your electricity use normal?</p>
+    <h2>${esc(b.headline)} <span class="kind-chip">${esc(b.label)}</span></h2>${lines.map((l) => `<p class="fine">${esc(l)}</p>`).join('')}${wins}
+    ${b.status === 'insufficient' ? '' : `<p class="fine"><b>How sure:</b> ${SURE[b.confidence]}. ${esc((b.caveats[0] || 'Based on this device’s readings only.'))}</p>`}
+    ${full ? b.caveats.slice(1).map((c) => `<p class="fine">${esc(c)}</p>`).join('') : ''}
+    ${billLine ? `<p class="fine">${esc(billLine)}</p>` : ''}
+    <a class="btn plain" href="#bills">Why is my bill what it is? ›</a></section>`;
+}
+/** Hours the routine says nobody is home but the meter shows heavy use. Never assumes what ran. */
+function awayCards(all = false) {
+  return A.unoccupiedUse({ state: S }).filter((a) => all || !a.explained).map((a) => `<section class="card ${a.explained ? '' : 'warn'}"><p class="card-label"><i class="dot"></i>Worth a look · hours nobody’s home</p>
+    <h2>${esc(a.headline)}</h2><p>${esc(a.detail)}</p><p class="fine">${esc(a.uncertainty)}</p>
+    ${a.answer === 'home' || a.answer === 'timer' ? `<p class="fine"><b>You said:</b> ${esc(A.QUESTIONS.away_home.options.find(([k]) => k === a.answer)[1])}. That explains it, so it isn’t treated as a problem.</p>`
+      : `<p class="fine"><b>What you can check:</b> ${esc(a.check)}</p>${a.answer === 'no' ? '<p class="fine">You said nobody was home and nothing runs then, so this is still unexplained.</p>' : ''}`}
+    ${a.question ? questionHtml({ key: a.question.key }, a.question, null, 'One question') : ''}</section>`).join('');
+}
+
+const KIND_TAG = { measured: 'Measured', estimate: 'Estimate', statement: 'Statement', reconciled: 'Matched to readings', projection: 'Utility projection' };
+function viewBills() {
+  const head = `${back('insights', 'Insights')}${pagehead('Your bill', 'What’s measured, what’s estimated')}`;
+  if (!usageDays().length) return `${head}<section class="card"><p>Import your Delmarva file to see your electricity month by month.</p>${importButton()}</section>`;
+  const bv = A.billView({ state: S });
+  const monthRows = bv.months.map((m) => `<tr><td>${esc(new Date(`${m.month}-15T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }))}${m.partial ? ` <small>(${m.days} of ${m.daysInMonth} days)</small>` : ''}</td><td class="t">${num(m.kwh)}</td><td class="t">${num(m.kwh_per_day, 1)}</td><td class="t">${m.interval_cost != null ? money(m.interval_cost) : '—'}</td><td class="t">${m.cents_per_kwh != null ? num(m.cents_per_kwh, 1) + '¢' : '—'}</td></tr>`).join('');
+  const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '—'}–${esc(shortDate(x.end))}${x.billed_days ? ` <small>(${x.billed_days} days)</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.readings_kwh != null ? num(x.readings_kwh) : '—'}</td><td class="t">${x.other_charges != null ? money(x.other_charges) : '—'}</td></tr><tr class="sub"><td colspan="5">${x.note ? `<small>${esc(x.note)}</small> ` : ''}<button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove this statement</button></td></tr>`).join('');
+  const p = bv.projection;
+  return `${head}
+    <section class="card"><p class="card-label">Where each number comes from</p><ul class="bullets">
+      <li><b>Measured</b> — kWh from your Delmarva readings.</li><li><b>Estimate</b> — the per-hour costs in that file. Not a bill: it has no fixed charges, taxes or credits, and the file’s own “bill so far” total is just those hourly costs added up, not a statement.</li>
+      <li><b>Statement</b> — only what you enter below.</li><li><b>Utility projection</b> — only what you enter below. The app never forecasts a bill amount.</li></ul></section>
+    ${bv.lines.length ? `<h2 class="section-title">What this says</h2><section class="card"><ul class="findings">${bv.lines.map((l) => `<li><span class="kind-tag">${esc(KIND_TAG[l.kind])}</span> ${esc(l.text)}</li>`).join('')}</ul></section>` : ''}
+    <h2 class="section-title">Month by month (calendar months)</h2><section class="card"><div class="table-wrap"><table><thead><tr><th>Month</th><th class="t">kWh</th><th class="t">Per day</th><th class="t">Estimate</th><th class="t">Price</th></tr></thead><tbody>${monthRows}</tbody></table></div>
+      <p class="fine">Calendar months aren’t billing periods. kWh is measured; the estimate and price come from the file’s per-hour costs.</p></section>
+    <h2 class="section-title">Your statements</h2><section class="card">
+      ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Dates</th><th class="t">Total</th><th class="t">Billed kWh</th><th class="t">Readings kWh</th><th class="t">Total − readings’ costs</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements entered. Without them the app can’t say which dates a bill covers or what fixed charges it includes.</p>'}
+      <div class="bill-form"><label class="item"><span>Service end date</span><input type="date" id="bill-end"></label><label class="item"><span>Service start date <small>(optional)</small></span><input type="date" id="bill-start"></label>
+      <label class="item"><span>Billed kWh <small>(optional)</small></span><input type="number" inputmode="decimal" id="bill-kwh" min="0"></label><label class="item"><span>Total amount ($)</span><input type="number" inputmode="decimal" id="bill-amount" min="0" step="0.01"></label>
+      <button class="btn secondary" data-act="bill-add">Add statement</button></div><p class="fine">Stored on this device only. Start dates let the app match a statement to your readings.</p></section>
+    <h2 class="section-title">Utility projection</h2><section class="card">${p ? `<p>${money(p.amount)}${p.asOf ? ` as of ${esc(shortDate(p.asOf))}` : ''} <button class="link" data-act="proj-clear">Remove</button></p>` : '<p>If Delmarva shows a projected bill, enter it to keep it next to the measured numbers.</p>'}
+      <div class="bill-form"><label class="item"><span>Projected amount ($)</span><input type="number" inputmode="decimal" id="proj-amount" min="0" step="0.01"></label><label class="item"><span>As of</span><input type="date" id="proj-asof"></label><button class="btn secondary" data-act="proj-save">${p ? 'Replace' : 'Save'} projection</button></div></section>
+    <h2 class="section-title">What’s missing</h2><section class="card"><ul class="bullets">${bv.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></section>`;
+}
+
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
 
 function viewInsights() {
@@ -571,6 +628,7 @@ function viewInsights() {
   }
   const r = report(), dq = A.dataQuality(S.usage, allTemps(), todayIso());
   const inv = invNow();
+  out.push(normalityCard(true), awayCards(true));
   if (inv?.hypotheses?.length) out.push(`<a class="card investigation-link" href="#investigate"><p class="card-label"><i class="dot"></i>Active investigation</p><h2>${esc(inv.headline)}</h2><p>${esc(inv.conclusion)}</p></a>`);
   if (lastImport) out.push(`<section class="card good imported"><p class="card-label"><i class="dot"></i>Import complete</p><p>${esc(lastImport)}</p></section>`);
   out.push(learnedSection(r));
@@ -582,6 +640,7 @@ function viewInsights() {
   const sv = savings();
   const svLine = { likely_savings: `About ${num(sv.weather?.pct, 0)}% less than expected`, likely_increase: 'Use is up since the change', inconclusive: 'No clear change yet', insufficient: 'Collecting enough days', no_change_date: 'Starts when you program the thermostat' }[sv.status] || 'Savings';
   out.push(`<h2 class="section-title">Details</h2><div class="grid three">
+    <a class="card" href="#bills"><p class="card-label">Your bill</p><h2>Month by month</h2><p>Measured kWh, estimates, statements and projections, kept apart.</p></a>
     <a class="card" href="#usage"><p class="card-label">Electricity use</p><h2>Daily use and patterns</h2><p>Day by day, a typical day, and how weather affects it.</p></a>
     <a class="card" href="#savings"><p class="card-label">Savings</p><h2>${esc(svLine)}</h2><p>How it’s measured and what’s still uncertain.</p></a>
     ${weatherLink()}</div>`);
@@ -840,9 +899,9 @@ function viewProgram() {
 
 // ---------- rendering ----------
 
-const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule, investigate: viewInvestigate, restore: viewRestore };
-const PARENT = { restore: 'settings', investigate: 'insights', weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
-const TITLES = { restore: 'Restore or merge', investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
+const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule, investigate: viewInvestigate, restore: viewRestore, bills: viewBills };
+const PARENT = { bills: 'insights', restore: 'settings', investigate: 'insights', weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
+const TITLES = { bills: 'Your bill', restore: 'Restore or merge', investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
 const route = () => { const h = location.hash.slice(1); return ROUTES[h] ? h : 'today'; };
 
 function render() {
@@ -1040,6 +1099,21 @@ const ACTIONS = {
     noteSaved(v === 'days' ? 'routine: each day separately' : 'routine: weekdays + weekends');
     render();
   },
+  'bill-add'() {
+    const v = (id) => document.getElementById(id)?.value.trim() || '', end = v('bill-end'), start = v('bill-start'), amount = +v('bill-amount'), kwh = v('bill-kwh') ? +v('bill-kwh') : null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(end) || !(amount >= 0) || !v('bill-amount')) return toast('Enter the service end date and the total amount.', true);
+    if (start && start > end) return toast('The start date is after the end date.', true);
+    if ((S.bills || []).some((b) => b.end === end && b.amount === amount)) return toast('That statement is already entered.', true);
+    S.bills = A.cleanBills([...(S.bills || []), { id: `${end}|${amount}`, start, end, kwh, amount, at: todayIso() }]);
+    save(); render(); toast('Statement saved on this device.');
+  },
+  'bill-remove'(el) { S.bills = (S.bills || []).filter((b) => b.id !== el.dataset.id); save(); render(); },
+  'proj-save'() {
+    const amount = +document.getElementById('proj-amount')?.value, asOf = document.getElementById('proj-asof')?.value || todayIso();
+    if (!document.getElementById('proj-amount')?.value || !(amount >= 0)) return toast('Enter the projected amount.', true);
+    S.projection = { amount, asOf }; save(); render(); toast('Projection saved. It’s shown as Delmarva’s number, not the app’s.');
+  },
+  'proj-clear'() { S.projection = null; save(); render(); },
   'restore-choice'(el) { if (pendingRestore) { pendingRestore.choices[el.dataset.id] = el.dataset.v; render(); } },
   'restore-cancel'() { pendingRestore = null; if (householdUpdate && route() === 'today') householdUpdate = { ...householdUpdate, dismissed: true }; location.hash = route() === 'restore' ? 'settings' : route(); render(); },
   'restore-merge'() {
