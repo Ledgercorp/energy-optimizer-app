@@ -386,3 +386,6 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #0a6
 .facts dd { margin: 0; }
 .found { color: var(--accent, #0a66d8); }
 tr.sub td { border-top: 0; padding-top: 0; }
+.exps li { padding: 10px 0; border-bottom: .5px solid var(--line); }
+.exps li:last-child { border-bottom: 0; }
+.exps .row2 { flex-wrap: wrap; gap: 8px; }

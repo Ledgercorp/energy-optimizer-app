@@ -38,6 +38,9 @@ export function migrate(raw) {
   s.moveIn = isDate(raw?.moveIn) ? raw.moveIn : '';
   s.bills = cleanBills(raw?.bills);
   s.projection = cleanProjection(raw?.projection);
+  s.experiments = cleanExperiments(raw?.experiments);
+  const th = cleanThermostat(raw?.profile?.thermostat);
+  if (th) s.profile.thermostat = th; else delete s.profile.thermostat;
   s.notes = arr(raw?.notes).filter((n) => n && typeof n.text === 'string' && isIso(n.at)).slice(-40).map((n) => ({ text: str(n.text, 300), at: n.at }));
   const ub = raw?.profile?.usualBill;
   if (ub && Number.isFinite(+ub.low) && Number.isFinite(+ub.high) && +ub.low > 0 && +ub.high >= +ub.low && +ub.high < 10000) s.profile.usualBill = { low: +ub.low, high: +ub.high, source: 'you' }; else delete s.profile.usualBill; // Number.isFinite(+ub.low) && Number.isFinite(+ub.high) && +ub.low > 0 && +ub.high >= +ub.low && +ub.high < 10000 ? { low: +ub.low, high: +ub.high, source: 'you' } : null;
@@ -57,6 +60,7 @@ export const planFingerprint = (plans) => JSON.stringify(plans.map((p) => [p.mod
 export function todayStatus(state, rec) {
   const su = setupInfo(state);
   if (!su.complete) return { kind: 'setup', missing: su.missing };
+  if (holdsSteady(state)) return { kind: 'hold', thermostat: state.profile.thermostat };
   if (rec.errors.length) return { kind: 'error', message: rec.errors[0] };
   if (!rec.plans.length) return { kind: 'off' };
   const same = state.programmed?.fingerprint === planFingerprint(rec.plans);
@@ -646,8 +650,9 @@ export function opportunities({ state, rec, model, summary, report = null }) {
   const evidence = (w, word) => `In your data (${ready(model?.[w === 'hdd' ? 'heat' : 'cool']) ? model.n : report.weather.n} days), each 1°F ${word} outside adds about ${fmt(per(w), 2)} kWh a day.`;
   const push = (o) => out.push({ reprogram: false, est: null, impact: o.est ? `About ${fmt(o.est)} kWh a month${money(o.est)} — an estimate from your data, not a measurement.` : null, ...o });
 
+  const held = holdsSteady(state); // the household holds one temperature on purpose: no schedule setbacks are suggested
   const heat = plan('heat');
-  if (heat && shows('hdd')) {
+  if (heat && shows('hdd') && !held) {
     const sp = heat.setpoints, hp = p.hvacType === 'heat_pump' || p.hvacType === 'unknown';
     const lim = hp ? 2 : 6, aw = awaySummary(p);
     const awayT = Math.max(p.comfort.min, sp.home - lim);
@@ -663,7 +668,8 @@ export function opportunities({ state, rec, model, summary, report = null }) {
     }
   }
   const cool = plan('cool');
-  if (cool && shows('cdd')) {
+  const coolOk = !held;
+  if (cool && shows('cdd') && coolOk) {
     const sp = cool.setpoints, aw = awaySummary(p);
     const awayT = Math.min(p.comfort.max, sp.home + 4);
     if (aw.total >= 12 && sp.away < awayT) {
@@ -675,7 +681,7 @@ export function opportunities({ state, rec, model, summary, report = null }) {
   // Use that doesn't drop while nobody is home (per the routine, any day).
   // Only meaningful once a schedule with away periods is actually programmed; before that, the thermostat has no reason to ease off.
   const programmed = state.programmed?.fingerprint && state.programmed.fingerprint === planFingerprint(rec.plans);
-  const at = report?.night ? awayTests({ state, temps: {}, hd: report.hd || [], report }) : null;
+  const at = !held && report?.night ? awayTests({ state, temps: {}, hd: report.hd || [], report }) : null;
   if (at?.available && at.away_watts >= 0.85 * at.evening_watts && at.away_watts - report.night.base >= 150) { // the overnight floor can include heating, so compare with evenings first
     const extra = ((at.away_watts - report.night.base) / 1000) * at.hours_per_week * 4.3;
     push({ id: 'away-high', what: programmed ? 'Check that the thermostat really eases off while nobody’s home' : 'Program the away setting for when nobody’s home', why: programmed ? `Nobody should be home ${at.away_hours}, yet use stays near evening levels. If heating or cooling runs as if someone were home, the schedule isn’t taking effect — a HOLD on the thermostat is the usual cause.${meterNote}` : `Nobody is home ${at.away_hours}, but use stays near the level when someone is — the thermostat isn’t set to ease off then yet.${meterNote}`, evidence: `While away: about ${fmt(at.away_watts)} W, vs. ${fmt(at.evening_watts)} W once someone’s home and ${fmt(report.night.base)} W at the quietest hour (${at.days} days of hourly data).`, investigate: programmed ? 'While you’re out, look at the thermostat: if it says HOLD AT, press RUN. Something else left running (a space heater, dehumidifier) shows the same pattern.' : 'Program the schedule from Today; afterwards the app checks whether use drops during those hours.', impact: `If use while away fell to the overnight level, about ${fmt(extra)} kWh a month${money(extra)}.`, confidence: p.hvacMetered === 'no' ? 'low' : 'medium', confidenceWhy: 'Measured from your hourly data; the meter can’t show which device is running.', reprogram: true, thermostat: 'Check the thermostat (no reprogramming if the schedule is already set)' });
@@ -1488,7 +1494,7 @@ export function zonePlans(state, now = Date.now()) {
 // device's value). A copy of this device's data is saved first, the result is read back to verify, and the merge can be undone.
 
 const sameNum = (a, b) => Math.abs(a - b) < 1e-9;
-const SETTING_AREAS = { buildingMode: 'Building season', comfort: 'Comfort temperatures', routine: 'Routine', tariff: 'Electricity rate', hvacType: 'Equipment', hvacMetered: 'Heating/cooling on your meter', recoveryMin: 'Warm-up time', changeDate: 'Savings start date' };
+const SETTING_AREAS = { thermostat: 'Thermostat as you set it', buildingMode: 'Building season', comfort: 'Comfort temperatures', routine: 'Routine', tariff: 'Electricity rate', hvacType: 'Equipment', hvacMetered: 'Heating/cooling on your meter', recoveryMin: 'Warm-up time', changeDate: 'Savings start date' };
 
 /** Read a backup file's text: an Energy backup (version 1 or 2) or a household update. Throws with a plain reason. */
 export function parseBackup(text) {
@@ -1524,6 +1530,8 @@ export function planMerge(local, incoming) {
     if (!l) inc('actions'); else if (JSON.stringify(l) === JSON.stringify(a)) same('actions');
     else plan.conflicts.push({ id: `action:${a.id}`, label: `“${a.title}”`, detail: `here: ${ACTION_STATUS[l.status]}${l.start ? ` since ${l.start}` : ''}; backup: ${ACTION_STATUS[a.status]}${a.start ? ` since ${a.start}` : ''}`, local: 'Keep this device’s', incoming: 'Use the backup’s' });
   }
+  const le = new Map((local.experiments || []).map((e) => [e.id, e]));
+  for (const e of incoming.experiments || []) { const l = le.get(e.id); if (!l) inc('experiments'); else if (JSON.stringify(l) === JSON.stringify(e)) same('experiments'); else plan.conflicts.push({ id: `experiment:${e.id}`, label: `Experiment “${e.title}”`, detail: `here: ${l.end ? `ended ${l.end}` : 'running'}${l.decision ? `, ${l.decision}` : ''}; backup: ${e.end ? `ended ${e.end}` : 'running'}${e.decision ? `, ${e.decision}` : ''}`, local: 'Keep this device’s', incoming: 'Use the backup’s' }); }
   const bk = (b) => `${b.end}|${b.amount}`, lb = new Set((local.bills || []).map(bk));
   for (const b of incoming.bills || []) lb.has(bk(b)) ? same('statements') : inc('statements');
   const hk = (h) => `${h.date}|${h.fingerprint}`, lh = new Set((local.programmedHistory || []).map(hk));
@@ -1550,6 +1558,7 @@ export function planMerge(local, incoming) {
 function showSetting(k, v) {
   if (k === 'routine') return v?.mode === 'days' ? 'day by day' : `weekdays ${v?.weekday?.wake}–${v?.weekday?.sleep}`;
   if (k === 'comfort') return `heat ${v?.heat?.home}° / cool ${v?.cool?.home}°`;
+  if (k === 'thermostat') return v ? `${v.setpoint}°F ${v.hold ? 'HOLD' : ''}, programming ${v.programming || '?'}` : 'not recorded';
   if (k === 'tariff') return v?.confirmed ? `${v.centsPerKwh}¢` : 'not set';
   if (k === 'buildingMode') return { heat_available: 'heating', cool_available: 'cooling', fan_only: 'fan only', unknown: 'not set' }[v] || 'not set';
   if (k === 'hvacMetered') return { yes: 'yes', no: 'no — building pays', partial: 'partly', unknown: 'not sure' }[v] || 'not set';
@@ -1578,6 +1587,9 @@ export function applyMerge(local, incoming, choices = {}, plan = planMerge(local
   if (!out.programmed || (incoming.programmed && (incoming.programmed.date > out.programmed.date || (incoming.programmed.date === out.programmed.date && pick('programmed') === 'incoming')))) out.programmed = incoming.programmed || out.programmed;
   const ok = (o) => `${o.ts}|${o.roomF}|${o.setF}`, seenO = new Set(out.observations.map(ok));
   out.observations = [...out.observations, ...(incoming.observations || []).filter((o) => !seenO.has(ok(o)))].sort((a, b) => a.ts - b.ts).slice(-500);
+  const exById = new Map((out.experiments || []).map((e) => [e.id, e]));
+  for (const e of incoming.experiments || []) { const l = exById.get(e.id); if (!l || (pick(`experiment:${e.id}`) === 'incoming')) exById.set(e.id, e); }
+  out.experiments = [...exById.values()];
   const billK = (b) => `${b.end}|${b.amount}`, seenB = new Set((out.bills || []).map(billK));
   out.bills = cleanBills([...(out.bills || []), ...(incoming.bills || []).filter((b) => !seenB.has(billK(b)))]);
   if (!out.projection && incoming.projection) out.projection = incoming.projection;
@@ -1627,13 +1639,13 @@ function validateHousehold(raw) {
   const notes = (Array.isArray(raw.notes) ? raw.notes : []).filter((t) => typeof t === 'string' && t.trim()).slice(0, 20).map((t) => t.trim().slice(0, 300));
   const ub = raw.usualBill && Number.isFinite(+raw.usualBill.low) && Number.isFinite(+raw.usualBill.high) && +raw.usualBill.low > 0 && +raw.usualBill.high >= +raw.usualBill.low ? { low: +raw.usualBill.low, high: +raw.usualBill.high } : null;
   const base = { id: raw.id.slice(0, 60), created: String(raw.created || '').slice(0, 30), note: String(raw.note || '').slice(0, 300), routine: { mode: 'days', days: Object.fromEntries(C.DOW.map((d) => [d, { wake: days[d].wake, leave: days[d].leave || '', back: days[d].back || '', sleep: days[d].sleep }])) }, buildingMode: raw.buildingMode || null, answers };
-  return { ...base, notes, usualBill: ub };
+  return { ...base, notes, usualBill: ub, thermostat: cleanThermostat(raw.thermostat) };
 }
 const dayLine = (r) => (r.leave && r.back ? `away ${C.fmtMin(C.toMin(r.leave))}–${C.fmtMin(C.toMin(r.back))}` : 'home all day') + `, up ${C.fmtMin(C.toMin(r.wake))}, bed ${C.fmtMin(C.toMin(r.sleep))}`;
 /** Line-by-line preview: each day now → after, the building season, and the answers to be recorded. */
 export function previewHousehold(state, update) {
   const lines = C.DOW.map((d) => { const now = dayLine(C.routineFor(state.profile.routine, d)), next = dayLine(update.routine.days[d]); return { day: C.DAY_NAME[d], now, next, changed: now !== next }; });
-  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, notes: update.notes || [], usualBill: update.usualBill || null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change', daytime_device: 'Anything new running for hours in the day', new_appliance: 'Something new running day and night', cooling_longer: 'Cooling running longer than usual', fan_mode: 'Thermostat fan setting' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
+  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, notes: update.notes || [], usualBill: update.usualBill || null, thermostat: update.thermostat || null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change', daytime_device: 'Anything new running for hours in the day', new_appliance: 'Something new running day and night', cooling_longer: 'Cooling running longer than usual', fan_mode: 'Thermostat fan setting' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
 }
 /** New state with the confirmed facts applied. Investigation-specific answers are tied to the investigation open right now. */
 export function applyHousehold(state, update, { investigationKey = '', today = '' } = {}) {
@@ -1648,6 +1660,7 @@ export function applyHousehold(state, update, { investigationKey = '', today = '
   const have = new Set((out.notes || []).map((n) => n.text));
   out.notes = [...(out.notes || []), ...(update.notes || []).filter((t) => !have.has(t)).map((text) => ({ text, at: today }))];
   if (update.usualBill) out.profile.usualBill = { ...update.usualBill, source: 'you' };
+  if (update.thermostat) out.profile.thermostat = { ...update.thermostat, confirmed: update.thermostat.confirmed || today };
   out.appliedUpdates = [...new Set([...(out.appliedUpdates || []), update.id])];
   return migrate(out);
 }
@@ -1658,6 +1671,7 @@ export function verifyHousehold(saved, update) {
   if (update.buildingMode && saved.profile.buildingMode !== update.buildingMode) bad.push('buildingMode');
   if (update.usualBill && (saved.profile.usualBill?.low !== update.usualBill.low || saved.profile.usualBill?.high !== update.usualBill.high)) bad.push('usual bill');
   if ((update.notes || []).some((t) => !(saved.notes || []).some((n) => n.text === t))) bad.push('notes');
+  if (update.thermostat && JSON.stringify(cleanThermostat(saved.profile.thermostat)) !== JSON.stringify(cleanThermostat({ ...update.thermostat, confirmed: saved.profile.thermostat?.confirmed }))) bad.push('thermostat');
   return { ok: !bad.length, bad };
 }
 
@@ -1870,6 +1884,18 @@ export function unoccupiedUse({ state, now = Date.now(), temps = {} }) {
  * (finished setup, a per-day routine, or an applied household update). Comfort temperatures and the meter question are optional.
  * Nothing here is written back: an unknown stays unknown.
  */
+/**
+ * What the household confirmed on the physical thermostat — kept apart from the app's proposed schedule and from "programmed".
+ * { mode, setpoint (°F), hold, programming: 'on'|'off', recovery: 'on'|'off'|null, coolingPrice: string|null, confirmed (date), source: 'you' }
+ */
+export function cleanThermostat(t) {
+  if (!t || typeof t !== 'object' || !Number.isFinite(+t.setpoint) || +t.setpoint < 50 || +t.setpoint > 90 || !['cool', 'heat'].includes(t.mode)) return null;
+  const onOff = (v) => (['on', 'off'].includes(v) ? v : null);
+  return { mode: t.mode, setpoint: +t.setpoint, hold: t.hold === true, programming: onOff(t.programming), recovery: onOff(t.recovery),
+    coolingPrice: typeof t.coolingPrice === 'string' && t.coolingPrice ? t.coolingPrice.slice(0, 20) : null, confirmed: isIso(t.confirmed) ? t.confirmed : '', source: 'you' };
+}
+/** Held at one temperature with programming off: the schedule in the app is only a proposal. */
+export const holdsSteady = (state) => { const t = state.profile.thermostat; return !!(t && t.hold && t.programming === 'off'); };
 export function setupInfo(state) {
   const p = state.profile, missing = [];
   const routineKnown = !!(p.setupDone || p.routine?.mode === 'days' || (state.appliedUpdates || []).length);
@@ -1892,10 +1918,23 @@ const BILL_PARTS = ['supply', 'delivery', 'fixed', 'taxes', 'credits', 'adjustme
 export function cleanBills(list) {
   return (Array.isArray(list) ? list : []).filter((b) => b && isIso(b.end) && isMoney(+b.amount) && +b.amount >= 0).slice(-60).map((b) => {
     const out = { id: String(b.id || `${b.end}|${b.amount}`).slice(0, 60), start: isIso(b.start) && b.start < b.end ? b.start : '', end: b.end, kwh: optNum(b.kwh) > 0 ? +b.kwh : null, amount: +b.amount,
-      days: Number.isInteger(+b.days) && +b.days > 0 && +b.days < 100 ? +b.days : null, estimatedRead: b.estimatedRead === true, source: b.source === 'pdf' ? 'pdf' : 'manual', at: isIso(b.at) ? b.at : '' };
+      days: Number.isInteger(+b.days) && +b.days > 0 && +b.days < 100 ? +b.days : null, estimatedRead: b.estimatedRead === true, source: b.source === 'pdf' ? 'pdf' : 'manual', at: isIso(b.at) ? b.at : '', statementDate: isIso(b.statementDate) ? b.statementDate : '' };
     for (const k of BILL_PARTS) out[k] = isMoney(optNum(b[k])) ? optNum(b[k]) : null;
     return out;
   }).sort((a, b) => (a.end < b.end ? -1 : 1));
+}
+/**
+ * How a new or corrected statement relates to the saved ones: an exact duplicate, a revision of the same service period (different figures —
+ * replace only if the household confirms), or an overlap with a different period (both kept, flagged). Never resolved silently.
+ */
+export function statementConflicts(saved, rec, { editingId = null } = {}) {
+  const list = cleanBills(saved).filter((b) => b.id !== editingId), r = cleanBills([rec])[0];
+  if (!r) return { invalid: true, duplicate: null, revision: null, overlaps: [] };
+  const same = (b) => b.end === r.end && (b.start || '') === (r.start || '');
+  const duplicate = list.find((b) => same(b) && b.amount === r.amount && (b.kwh ?? null) === (r.kwh ?? null)) || null;
+  const revision = duplicate ? null : list.find((b) => b.end === r.end || (r.start && b.start === r.start)) || null;
+  const overlaps = list.filter((b) => b !== duplicate && b !== revision && b.start && r.start && b.start < r.end && r.start < b.end);
+  return { duplicate, revision, overlaps };
 }
 export function cleanProjection(p) {
   if (!p || !isMoney(+p.amount) || +p.amount < 0) return null;
@@ -1953,7 +1992,6 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     const [y, mo] = m.split('-').map(Number), dim = new Date(Date.UTC(y, mo, 0)).getUTCDate(), kwh = sum(ds.map((d) => d.kwh)), cost = costOf(ds);
     return { month: m, days: ds.length, daysInMonth: dim, partial: ds.length < dim, kwh: r1(kwh), kwh_per_day: r1(kwh / ds.length), interval_cost: cost != null ? r2(cost) : null, cents_per_kwh: cost != null && kwh ? r2((cost / kwh) * 100) : null };
   });
-  const flatPrice = (() => { const hrs = Object.keys(state.usage.hourly || {}).slice(-24 * 30); return hrs.length >= 24 * 7 && monthRows.length ? 'flat' : null; })();
   const stretches = [];
   if (days.length >= 30) {
     const last = days[days.length - 1].date;
@@ -1990,6 +2028,8 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     if (b.estimatedRead) notes.push('Delmarva estimated the meter reading for this bill; a later bill corrects it, so its kWh may not match your readings.');
     if (kwhGap != null && kwhGap > 0.03) notes.push(`Billed kWh differs from your readings by ${fmt(kwhGap * 100, 1)}% — more than rounding.`);
     if (b.adjustments) notes.push('Includes an adjustment, which is left out of usage comparisons.');
+    const ov = bills.filter((o) => o !== b && o.start && b.start && o.start < b.end && b.start < o.end);
+    if (ov.length) notes.push(`Overlaps the statement ending ${md(ov[0].end)} — one of them may be a corrected bill; comparisons treat them separately.`);
     return { ...b, billed_days: bd, covered, readings_kwh: k1 != null ? r1((k1 + k2) / 2) : null, readings_kwh_range: k1 != null ? [r1(Math.min(k1, k2)), r1(Math.max(k1, k2))] : null,
       kwh_matches: kwhGap != null ? kwhGap <= 0.03 : null, interval_cost: intervalCost != null ? r2(intervalCost) : null, beyond_readings: intervalCost != null ? r2(b.amount - intervalCost) : null,
       cost_per_day: bd ? r2(b.amount / bd) : null, kwh_per_day: bd && b.kwh ? r1(b.kwh / bd) : null, cents_per_kwh: b.kwh ? r2((b.amount / b.kwh) * 100) : null, variable_cents: variablePrice(b) != null ? r2(variablePrice(b) * 100) : null,
@@ -2045,13 +2085,13 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     if (c.interval_cost != null && p.interval_cost != null) lines.push({ kind: 'estimate', text: `Estimate from the file’s per-hour costs: ${money(c.interval_cost)} vs ${money(p.interval_cost)}. This is not a bill: it leaves out fixed charges, taxes and credits, and the file’s own totals aren’t verified against a statement.` });
   }
   const usual = state.profile.usualBill && Number.isFinite(state.profile.usualBill.low) ? state.profile.usualBill : null;
-  return { months: monthRows, stretches, thirty, statements, projection: proj, estimate, compare, lines, missing, hasStatements: bills.length > 0, usual, flatPrice };
+  return { months: monthRows, stretches, thirty, statements, projection: proj, estimate, compare, lines, missing, hasStatements: bills.length > 0, usual, price: priceStructure(state) };
 }
 const money = (x) => `$${fmt(x, 2)}`;
 
 // ================= Savings: what is worth changing =================
 
-const SAVE_KIND = { measured: 'Measured', modelled: 'Modelled from your readings', illustrative: 'General rule of thumb', unknown: 'Can’t be estimated yet' };
+const SAVE_KIND = { measured: 'Measured', engineering: 'Engineering estimate', modelled: 'Modelled from your readings', illustrative: 'General rule of thumb', unknown: 'Can’t be estimated yet' };
 export const SAVINGS_KIND = SAVE_KIND;
 const EFFORT_W = { none: 1, low: 1, medium: 1.6, high: 3 }, CONF_W = { high: 1, medium: 0.6, low: 0.3 };
 
@@ -2069,9 +2109,10 @@ function coolingSlope(days, temps) {
 }
 
 /**
- * Ranked opportunities from this household's readings. Each says what to change, why, the evidence, the savings and how they were
- * estimated (measured / modelled / rule of thumb / unknown), confidence, effort, comfort impact and how to verify. Options that the
- * evidence says aren't worth it are returned separately with the reason, so they aren't suggested again without new evidence.
+ * Ranked opportunities from this household's readings. Each says: the evidence (measured), whether the use is controllable, the expected
+ * impact only when it can be estimated (and how), confidence in the evidence, cost and effort, comfort, and how to verify — usually by
+ * running a savings experiment. Options the evidence says aren't worth it are listed with the reason, so they aren't raised again.
+ * Speculative dollar amounts never rank above evidence: unknown savings are scored on evidence and effort alone.
  */
 export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   const r = usageReport({ state, temps, now });
@@ -2081,86 +2122,80 @@ export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   const $ = (k) => (rate != null ? r2(k * rate) : null);
   const items = [], considered = [];
   const add = (o) => {
-    const mid = o.savings.dollars ? (o.savings.dollars[0] + o.savings.dollars[1]) / 2 : o.savings.upTo ? o.savings.upTo * 0.25 : 0;
-    const score = (mid * CONF_W[o.confidence]) / EFFORT_W[o.effort] - (o.comfort === 'noticeable' ? 1 : 0);
-    items.push({ ...o, savings: { ...o.savings, label: SAVE_KIND[o.savings.kind] }, score: r2(score) });
+    const est = o.savings.dollars ? (o.savings.dollars[0] + o.savings.dollars[1]) / 2 : 0;
+    const evidence = { high: 3, medium: 2, low: 1 }[o.confidence];
+    // Measured or engineering estimates may add their value; hypothetical amounts add nothing to the rank.
+    const score = evidence * 2 + (['measured', 'engineering'].includes(o.savings.kind) ? Math.min(est, 20) / 2 : 0) - (EFFORT_W[o.effort] - 1) * 2 - (o.comfort === 'noticeable' ? 2 : o.comfort === 'slight' ? 0.5 : 0);
+    items.push({ cost: 'Free', control: 'unknown', ...o, savings: { ...o.savings, label: SAVE_KIND[o.savings.kind] }, score: r2(score) });
   };
-  const bl = r.baseline;
+  const bl = r.baseline, part = (w) => w.name.replace(/ \(.*/, '');
 
-  // 1. Cooling setpoint, from how much this home's use rises on warm days.
-  const cs = coolingSlope(days, temps);
-  const cdd = (from, to) => sum(Object.entries(temps).filter(([d, t]) => d >= from && d <= to && Number.isFinite(t)).map(([, t]) => Math.max(0, t - 65)));
-  if (cs && cs.per_cdd > 2 * cs.se && p.buildingMode !== 'heat_available') {
-    const lastYearSummer = days.filter((d) => d.date.slice(5, 7) >= '06' && d.date.slice(5, 7) <= '09'), sm = lastYearSummer.length ? cdd(lastYearSummer[0].date, lastYearSummer[lastYearSummer.length - 1].date) / (lastYearSummer.length / 30) : 0;
-    const coolMonth = cs.per_cdd * sm, lo = coolMonth * 0.02, hi = coolMonth * 0.04; // 2–4% of cooling energy per °F: general rule of thumb
-    const recentT = avg(days.slice(-14).map((d) => temps[d.date]).filter(Number.isFinite));
-    if (coolMonth >= 30 && metered !== 'no') add({ id: 'cooling-setpoint', thermostat: true,
-      action: 'Next warm season, set cooling 1°F warmer when you’re home (2°F at night if you sleep comfortably).',
-      why: `Your use rises about ${fmt(cs.per_cdd, 2)} kWh a day for each degree the day averages above 65°F (from ${cs.n} days). Over a summer month that weather-driven part is about ${fmt(coolMonth)} kWh.${recentT < 62 ? ' It’s cool now, so this matters little until it warms up.' : ''}`,
-      savings: { kind: 'modelled', kwhMonth: [r0(lo), r0(hi)], dollars: $(lo) != null ? [$(lo), $(hi)] : null, per: 'summer month', method: `Weather-driven kWh in a summer month (${fmt(cs.per_cdd, 2)} kWh per degree-day × ${fmt(sm)} degree-days) × 2–4% per °F, a general rule of thumb, not measured in your home.${rate != null ? ` Priced at ${rf.source}.` : ''}` },
-      confidence: cs.r2 >= 0.3 ? 'medium' : 'low', effort: 'low', comfort: 'slight', verify: 'Keep it for 2–3 warm weeks, then compare kWh with earlier days at the same outdoor temperature (Insights shows this).',
-      caveat: metered === 'unknown' ? 'Assumes cooling is on your meter — not yet confirmed.' : (cs.r2 < 0.3 ? `Weather explains only ${fmt(Math.max(0, cs.r2) * 100)}% of your day-to-day differences, so this estimate is rough.` : '') });
-    else considered.push({ id: 'cooling-setpoint', what: 'Raise the cooling setpoint', why: metered === 'no' ? 'Cooling isn’t on your meter.' : `Weather-driven use is small here (about ${fmt(coolMonth)} kWh in a summer month).` });
-  } else considered.push({ id: 'cooling-setpoint', what: 'Raise the cooling setpoint', why: cs ? 'Your readings don’t show use rising clearly with warmer days, so the effect can’t be estimated.' : 'Needs a month or more of warm-weather readings with temperatures.' });
-
-  // 2. Always-on load on mild nights.
-  const n = r.night;
-  if (n && n.mildNights >= 7) {
-    const floor = n.alwaysOn;
-    if (floor > 220) {
-      const lo = (Math.min(30, floor - 150) / 1000) * 24 * 30, hi = (Math.min(80, floor - 150) / 1000) * 24 * 30;
-      add({ id: 'standby', thermostat: false, action: 'Find and switch off things that stay on all night (a second fridge, old electronics on standby, chargers, a dehumidifier you don’t need).',
-        why: `On mild nights, when heating and cooling rest, your home still draws about ${fmt(floor)} W between 1 and 5 AM (measured on ${n.mildNights} nights). Many apartments sit around 150–220 W.`,
-        savings: { kind: 'illustrative', kwhMonth: [r0(lo), r0(hi)], dollars: $(lo) != null ? [$(lo), $(hi)] : null, per: 'month', method: 'If 30–80 W of that turns out to be avoidable (an assumption) × 24 h × 30 days.' },
-        confidence: 'medium', effort: 'low', comfort: 'none', verify: 'Switch suspects off for a week; the 1–5 AM level in the next import should drop by about that many watts.' });
-    } else considered.push({ id: 'standby', what: 'Cut always-on power', why: `Your mild-night floor is about ${fmt(floor)} W — already typical for an apartment.` });
-  } else considered.push({ id: 'standby', what: 'Cut always-on power', why: 'Needs a week of mild nights (no heating or cooling) to measure the always-on load.' });
-
-  // 3. A part of the day that is unusually high for this household.
+  // 1. A part of the day that is higher than this household's own history (measured).
   const hiWin = (bl?.windows || []).filter((w) => w.flag === 'high').sort((a, b) => b.recent_w - b.usual_w - (a.recent_w - a.usual_w))[0];
   if (hiWin) {
-    const hrs = BLOCKS[hiWin.name][1] - BLOCKS[hiWin.name][0], extra = ((hiWin.recent_w - hiWin.usual_w) * hrs * 30) / 1000, part = hiWin.name.replace(/ \(.*/, '');
-    add({ id: 'window', thermostat: false, action: `Walk through the apartment one ${part} and note what is running for hours (cooling, a computer, a dehumidifier, anything charging).`,
-      why: `${cap(part)}s lately average ${fmt(hiWin.recent_w)} W, higher than any earlier two weeks (usual ${fmt(hiWin.low_w)}–${fmt(hiWin.high_w)} W). The meter can’t say what it is, so whether any of it is avoidable is unknown.`,
-      savings: { kind: 'unknown', kwhMonth: null, dollars: null, upTo: $(extra), method: `The extra above your usual ${part}s is about ${fmt(extra)} kWh a month${$(extra) != null ? ` (≈ ${money($(extra))})` : ''}. That is an upper bound, and only if the cause is something you don’t need.` },
-      confidence: 'low', effort: 'low', comfort: 'none', verify: `After finding and changing anything, import a newer file: the ${part} level should fall back toward ${fmt(hiWin.usual_w)} W.` });
+    const [h0, h1] = BLOCKS[hiWin.name], extra = ((hiWin.recent_w - hiWin.usual_w) * (h1 - h0) * 30) / 1000;
+    add({ id: 'window', thermostat: false, control: 'unknown', action: `Find out what runs for hours in the ${part(hiWin)} (walk through once and note what’s on).`,
+      why: `${cap(part(hiWin))}s lately average ${fmt(hiWin.recent_w)} W — above every earlier two weeks (usual ${fmt(hiWin.low_w)}–${fmt(hiWin.high_w)} W). The meter can’t say what it is.`,
+      evidence: `Measured: hourly readings, latest 14 days vs your ${fmt(hiWin.rank_pct)}th-percentile history.`,
+      savings: { kind: 'unknown', dollars: null, upTo: $(extra), method: `The extra above your usual is about ${fmt(extra)} kWh a month${$(extra) != null ? ` (≈ $${fmt($(extra), 2)})` : ''} — a measured ceiling, and only if the cause is something you don’t need.` },
+      confidence: 'high', effort: 'low', comfort: 'none', verify: 'If you find something to switch off, start an experiment for those hours; the app compares them with the weeks before.',
+      experiment: { title: `Switch off what I found running in the ${part(hiWin)}s`, hours: [h0, h1], days: null } });
   }
 
-  // 4. Hours nobody is home.
+  // 2. The always-on load: measured; how much of it is removable is unknown.
+  const n = r.night;
+  if (n && n.mildNights >= 7) {
+    const floor = n.alwaysOn, per10 = (10 / 1000) * 24 * 30;
+    if (floor > 220) add({ id: 'standby', thermostat: false, control: 'unknown', action: 'Look for things that stay on all night, then test switching them off for a week.',
+      why: `On mild nights your home draws about ${fmt(floor)} W between 1 and 5 AM. Many apartments sit around 150–220 W, but part of yours may be things you need (fridge, router). Nothing removable has been identified yet.`,
+      evidence: `Measured: 1–5 AM average on ${n.mildNights} mild nights.`,
+      savings: { kind: 'unknown', dollars: null, method: `Not estimable until something removable is found. For scale: every 10 W switched off all day and night is ${fmt(per10, 1)} kWh a month${$(per10) != null ? ` (≈ $${fmt($(per10), 2)})` : ''} — arithmetic, not a prediction.` },
+      confidence: 'high', effort: 'low', comfort: 'none', verify: 'Start an experiment for 1–5 AM when you switch something off; small devices may be below what the meter can show, and the app will say so.',
+      experiment: { title: 'Switch off always-on devices overnight', hours: [1, 5], days: null } });
+    else considered.push({ id: 'standby', what: 'Cut always-on power', why: `Your mild-night floor is about ${fmt(floor)} W — already typical for an apartment.` });
+  } else considered.push({ id: 'standby', what: 'Cut always-on power', why: 'Needs a week of mild nights (no heating or cooling) to measure the always-on load.' });
+
+  // 3. Cooling setpoint: the household's own temperature is the baseline; one degree warmer is an optional, measured experiment.
+  const cs = coolingSlope(days, temps), th = p.thermostat, base = th?.mode === 'cool' ? th.setpoint : null;
+  if (base != null && p.buildingMode !== 'heat_available') {
+    const meterNote = metered === 'yes' ? '' : metered === 'no' ? ' Cooling isn’t on your meter, so this wouldn’t change your bill.' : ' It isn’t confirmed that the cooling equipment runs on your meter, so any saving may not show on your bill.';
+    if (metered !== 'no') add({ id: 'setpoint', thermostat: true, control: 'yes', action: `Optional test: hold ${base + 1}°F instead of ${base}°F for two weeks of warm weather, then go back if it isn’t comfortable.`,
+      why: `You keep the thermostat at ${base}°F on HOLD, day and night, by choice — that stays your baseline. One degree warmer is the smallest change that could matter.${cs ? ` In your readings, outdoor temperature explains only ${fmt(Math.max(0, cs.r2) * 100)}% of daily differences, so past days can’t say what one degree is worth.` : ''}${meterNote} ${base + 2}°F is a further option only if ${base + 1}°F feels fine.`,
+      evidence: cs ? `Measured: ${cs.n} days of readings with outdoor temperatures; your confirmed setting (${base}°F HOLD, programming off).` : `Your confirmed setting (${base}°F HOLD, programming off).`,
+      savings: { kind: 'unknown', dollars: null, method: 'Not estimated. The test measures it directly; in cool weather the cooling runs little, so the meter may not show a difference and the result will say “no clear difference”.' },
+      confidence: 'low', effort: 'low', comfort: 'slight', verify: 'Start a test; the comparison uses the same hours and allows for the weather. The app never changes the thermostat — you set it, and set it back.',
+      caveat: metered === 'yes' ? '' : 'Whether cooling is on your meter is unconfirmed.', experiment: { title: `Cooling held at ${base + 1}°F instead of ${base}°F`, hours: null, days: null, cooling: true } });
+    else considered.push({ id: 'setpoint', what: `Hold ${base + 1}°F instead of ${base}°F`, why: 'Cooling isn’t on your meter, so it wouldn’t change your bill.' });
+  } else if (cs && cs.per_cdd > 2 * cs.se && cs.r2 >= 0.3 && metered === 'yes' && p.buildingMode !== 'heat_available') {
+    add({ id: 'cooling-setpoint', thermostat: true, control: 'yes', action: 'When it’s warm, try cooling 1°F warmer while you’re home and test it for two weeks.',
+      why: `Your use rises about ${fmt(cs.per_cdd, 2)} kWh a day per degree above 65°F (weather explains ${fmt(cs.r2 * 100)}% of daily differences).`, evidence: `Measured: ${cs.n} days of readings with outdoor temperatures.`,
+      savings: { kind: 'unknown', dollars: null, method: 'The effect of one degree can’t be read from past days; a test measures it directly.' },
+      confidence: 'medium', effort: 'low', comfort: 'slight', verify: 'Start a test; the comparison allows for outdoor temperature.', experiment: { title: 'Cooling 1°F warmer', hours: null, days: null, cooling: true } });
+  } else considered.push({ id: 'cooling-setpoint', what: 'Change the cooling setpoint', why: `${metered !== 'yes' ? 'It isn’t confirmed that the building’s cooling runs on your meter, so a thermostat change may not affect your bill. ' : ''}${cs ? `Outdoor temperature explains only ${fmt(Math.max(0, cs.r2) * 100)}% of your day-to-day differences, so the effect can’t be estimated from past days.` : 'There aren’t enough warm days with temperatures to judge.'} Record your thermostat setting in Settings to get a one-degree test.` });
+
+  // 4. Hours nobody is home: the measured ceiling, and why a setback is uncertain.
   for (const a of unoccupiedUse({ state, now, temps })) {
     if (a.explained) { considered.push({ id: a.id, what: `${C.DAY_NAME[a.day]} ${a.window} while nobody’s home`, why: 'You said someone was home or something runs on a schedule then.' }); continue; }
     const hrs = (C.toMin(a.window.split('–')[1]) - C.toMin(a.window.split('–')[0])) / 60 || 2;
-    const extra = avg(a.recent.map((o) => Math.max(0, o.w - a.quiet_night_w))) * hrs * 4.3 / 1000; // kWh a month above a quiet night
-    const setback = extra * 0.25;
-    add({ id: a.id, thermostat: true, action: `Check what runs on ${C.DAY_NAME[a.day]}s ${a.window} — then, if it is the cooling, let the thermostat ease off 3–4°F for those hours.`,
-      why: `${a.headline} It is ${fmt(a.recent.length)} weeks of a ${fmt(hrs)}-hour window.`,
-      savings: { kind: 'modelled', kwhMonth: [0, r0(setback)], dollars: $(setback) != null ? [0, $(setback)] : null, upTo: $(extra), per: 'month',
-        method: `Use in that window above a quiet night is about ${fmt(extra, 1)} kWh a month at most${$(extra) != null ? ` (${money($(extra))})` : ''}. A short setback saves only part of it, because the apartment must be cooled again afterwards; 0–25% of it is assumed.` },
-      confidence: 'low', effort: 'low', comfort: 'none', verify: `If you change it, compare the next 4 ${C.DAY_NAME[a.day]}s’ ${a.window} readings with these.`,
-      caveat: 'Not worth a schedule change until you know what runs then; the possible saving is small.' });
+    const extra = (avg(a.recent.map((o) => Math.max(0, o.w - a.quiet_night_w))) * hrs * 4.3) / 1000;
+    considered.push({ id: a.id, what: `${C.DAY_NAME[a.day]}s ${a.window} while nobody’s home`, why: `${holdsSteady(state) ? `You hold ${p.thermostat.setpoint}°F on purpose and are out only about ${fmt(hrs)} hours a week, so a schedule setback isn’t suggested. ` : ''}Even if all of the use above a quiet night were avoidable, it is about ${fmt(extra, 1)} kWh a month${$(extra) != null ? ` (≈ $${fmt($(extra), 2)})` : ''} — measured. A short setback would save only part of that, because the apartment is cooled again afterwards; how much is unknown. Small either way; an experiment can check it if you’re curious.`,
+      experiment: { title: `Thermostat eases off on ${C.DAY_NAME[a.day]}s while we’re out`, hours: [C.toMin(a.window.split('–')[0]) / 60 | 0, Math.ceil(C.toMin(a.window.split('–')[1]) / 60)], days: [C.DOW.indexOf(a.day)], cooling: true } });
   }
 
   // Considered, with the reason — so they aren't raised again without new evidence.
-  considered.push({ id: 'time-shift', what: 'Run laundry or dishes at other hours', why: 'Your per-hour price in the Delmarva file is the same at every hour, so shifting use saves nothing.' });
-  considered.push({ id: 'peaks', what: 'Avoid short peaks', why: 'Residential Delmarva bills charge for kWh, not for peaks, so short peaks cost the same as the energy they use.' });
-  const lampKwh = [0.07, 0.48]; // 2 lamps × 4 h: LED 9 W … incandescent 60 W
-  considered.push({ id: 'lighting', what: 'Lamps at night', why: `Two lamps for 4 hours use about ${fmt(lampKwh[0], 2)}–${fmt(lampKwh[1], 2)} kWh a night (LED vs. old bulbs) — at most about ${fmt(lampKwh[1] * 30)} kWh a month${$(lampKwh[1] * 30) != null ? ` (${money($(lampKwh[1] * 30))})` : ''}, too small to explain a daytime change.` });
+  const ps = priceStructure(state);
+  considered.push({ id: 'time-shift', what: 'Run laundry or dishes at other hours', why: ps.flat ? `${ps.text} Shifting use saves nothing.` : 'The file doesn’t show whether your price changes by hour, so the benefit of shifting use is unknown.' });
+  considered.push({ id: 'peaks', what: 'Avoid short peaks', why: 'Residential bills charge for kWh used; a short peak costs only the energy it uses.' });
+  const lamp = (w) => (2 * w * 4 * 30) / 1000;
+  considered.push({ id: 'lighting', what: 'Lamps at night', why: `Engineering estimate, assuming two lamps for 4 hours a night: ${fmt(lamp(9))} kWh a month with LED bulbs (9 W) to ${fmt(lamp(60))} kWh with old 60 W bulbs${$(lamp(60)) != null ? ` (at most ≈ $${fmt($(lamp(60)), 2)})` : ''} — too small to explain a daytime change, and likely below what the meter can show. Your lamps’ real wattage would make this exact.` });
   const fanAns = answerFor(state, 'fan_mode', '');
-  considered.push({ id: 'fan', what: 'Thermostat fan AUTO instead of ON', why: fanAns?.value === 'auto' ? 'You said the fan is on AUTO.' : 'A fan left ON would raise use day and night; your nights didn’t rise, so it’s unlikely — still a free 10-second check on the thermostat.' });
+  considered.push({ id: 'fan', what: 'Thermostat fan AUTO instead of ON', why: fanAns?.value === 'auto' ? 'You said the fan is on AUTO.' : 'A fan left ON would raise use day and night; your nights didn’t rise, so it’s unlikely. Still a free 10-second check on the thermostat.' });
   considered.push({ id: 'equipment', what: 'New equipment (thermostat, AC, appliances)', why: 'No purchase has a payback case from your readings; the app won’t suggest spending money without one.' });
 
-  // Too small to be worth your time: keep the reason so it isn't suggested again without new evidence.
-  for (let i = items.length - 1; i >= 0; i--) {
-    const o = items[i], hi = o.savings.dollars ? o.savings.dollars[1] : null;
-    if (hi != null && hi < 1 && !(o.savings.upTo >= 5)) {
-      considered.unshift({ id: o.id, what: o.action, why: `Worth at most about ${money(hi)} a ${o.savings.per === 'summer month' ? 'summer month' : 'month'} by your readings${o.savings.upTo ? ` (even the most it could be is ${money(o.savings.upTo)})` : ''}. ${o.savings.method}`, small: true });
-      items.splice(i, 1);
-    }
-  }
   items.sort((a, b) => b.score - a.score);
   const normal = bl && ['typical', 'return_to_typical', 'unusually_low'].includes(bl.status);
-  return { items, considered, rate: rf, normal, baselineStatus: bl?.status || null,
-    note: normal ? 'Your use is normal for your home. Normal isn’t the same as efficient; these are the changes your readings can support.' : '' };
+  return { items, considered, rate: rf, normal, baselineStatus: bl?.status || null, price: ps,
+    note: normal ? 'Your use is normal for your home. Normal isn’t the same as efficient — but no saving below is proven yet. The way to find out is to test one change and let the meter show the result.' : '' };
 }
 
 
@@ -2181,6 +2216,7 @@ export function parseStatementText(text) {
   const M = String.raw`[^\n$\d]{0,30}\$?\s*\(?(-?[\d,]+\.\d{2})\)?`;
   const fields = {
     start: per ? usDate(per[1]) : '', end: per ? usDate(per[2]) : '',
+    statementDate: (() => { const m = new RegExp(String.raw`(?:bill|statement|billing)\s+date[^\n\d]{0,15}` + D, 'i').exec(t); return m ? usDate(m[1]) : ''; })(),
     days: (() => { const m = /(?:number of days|billing days|days in (?:billing|service) period|days billed)[^\d\n]{0,15}(\d{2})\b/i.exec(t); return m ? +m[1] : null; })(),
     kwh: (() => { const m = /(?:total\s+kwh(?:\s+used)?|kwh\s+used|total\s+usage|energy\s+used)[^\d\n]{0,25}([\d,]+(?:\.\d+)?)/i.exec(t); return m ? amt(m[1]) : null; })(),
     amount: money1(new RegExp(String.raw`(?:total\s+)?current\s+(?:electric\s+)?charges` + M, 'i')),
@@ -2198,4 +2234,103 @@ export function parseStatementText(text) {
   if (fields.start && fields.end && fields.start >= fields.end) { fields.start = ''; fields.end = ''; }
   const found = Object.entries(fields).filter(([, v]) => v !== null && v !== '').map(([k]) => k);
   return { fields, found, notFound: Object.keys(fields).filter((k) => !found.includes(k)) };
+}
+
+// ================= Price structure: measured from the file, never assumed =================
+
+/**
+ * The file only keeps a cost per day. If the price per kWh were different at different hours, a day's cost per kWh would move as the
+ * day's load shape moves. So: a stable daily ¢/kWh across days whose shapes differ is evidence of one flat price within the day.
+ */
+export function priceStructure(state) {
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete && d.cost != null && d.kwh > 0).slice(-60);
+  if (days.length < 14) return { known: false, reason: 'Needs at least two weeks of readings with costs.' };
+  const hd = new Map(hourlyByDay(state.usage, days.map((d) => d.date)).map((d) => [d.date, d]));
+  const runs = []; // periods of a constant daily price (prices do change between dates)
+  for (const d of days) { const c = (d.cost / d.kwh) * 100, last = runs[runs.length - 1]; if (last && Math.abs(last.cents - c) < 0.02) { last.to = d.date; last.days.push(d); } else runs.push({ cents: c, from: d.date, to: d.date, days: [d] }); }
+  const longest = runs.reduce((m, r) => (r.days.length > m.days.length ? r : m));
+  const share = longest.days.map((d) => hd.get(d.date)).filter(Boolean).map((x) => sum(x.h.slice(12, 22)) / sum(x.h));
+  const shapeSpread = share.length >= 7 ? Math.max(...share) - Math.min(...share) : 0;
+  const flat = longest.days.length >= 14 && shapeSpread >= 0.1;
+  return { known: flat, flat, cents: r2(longest.cents), days: longest.days.length, from: longest.from, to: longest.to, changes: runs.length - 1,
+    text: flat ? `Your cost per kWh in the file was ${fmt(longest.cents, 2)}¢ on each of ${longest.days.length} days (${md(longest.from)}–${md(longest.to)}), even on days when more of your use fell in the afternoon and evening — so the price doesn’t change with the hour.`
+      : 'The file doesn’t show whether your price changes by hour.' };
+}
+
+// ================= Savings experiments: try one change, measure it honestly =================
+
+export const EXP_STATUS = { running: 'Running', ended: 'Ended' };
+const DOW_IDX = (iso) => new Date(`${iso}T12:00:00Z`).getUTCDay();
+/** Sanitise experiments the household created. Unknown fields stay empty; nothing is invented. */
+export function cleanExperiments(list) {
+  return (Array.isArray(list) ? list : []).filter((e) => e && typeof e.id === 'string' && typeof e.title === 'string' && isIso(e.start)).slice(-40).map((e) => ({
+    id: e.id.slice(0, 40), title: e.title.slice(0, 160), start: e.start, end: isIso(e.end) && e.end >= e.start ? e.end : '',
+    hours: Array.isArray(e.hours) && e.hours.length === 2 && e.hours.every((h) => Number.isInteger(h) && h >= 0 && h <= 24) && e.hours[0] < e.hours[1] ? e.hours : null,
+    days: Array.isArray(e.days) && e.days.length && e.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ? [...new Set(e.days)].sort() : null,
+    watts: Number.isFinite(+e.watts) && +e.watts > 0 && +e.watts < 10000 ? +e.watts : null, hoursPerDay: Number.isFinite(+e.hoursPerDay) && +e.hoursPerDay > 0 && +e.hoursPerDay <= 24 ? +e.hoursPerDay : null,
+    cooling: e.cooling === true, exclude: (Array.isArray(e.exclude) ? e.exclude : []).filter(isIso).slice(0, 60), decision: ['keep', 'revert'].includes(e.decision) ? e.decision : null,
+    note: String(e.note || '').slice(0, 300), at: isIso(e.at) ? e.at : e.start,
+  })).sort((a, b) => (a.start < b.start ? -1 : 1));
+}
+
+/**
+ * Before/after comparison for one experiment:
+ *  metric = kWh in the experiment's hours (or the whole day) on its days of the week, complete days only, minus days the household excluded;
+ *  baseline = the same metric in the 8 weeks before the start; weather = a fitted temperature effect when the baseline shows one, else days
+ *  matched within 4°F, else none (said plainly). Result: reduced / increased / inconclusive / too small to measure / not attributable / collecting.
+ */
+export function evaluateExperiment({ state, temps = {}, exp, now = Date.now() }) {
+  const e = cleanExperiments([exp])[0];
+  if (!e) return { status: 'invalid', label: 'Not a valid experiment' };
+  const [h0, h1] = e.hours || [0, 24], hrs = h1 - h0, perWeek = e.days ? e.days.length : 7;
+  const all = hourlyByDay(state.usage, C.dailyTotals(state.usage).filter((d) => d.complete).map((d) => d.date))
+    .filter((d) => (!e.days || e.days.includes(DOW_IDX(d.date))) && !e.exclude.includes(d.date));
+  const val = (d) => sum(d.h.slice(h0, h1));
+  const lastDate = all.length ? all[all.length - 1].date : null;
+  const end = e.end || lastDate || e.start;
+  const before = all.filter((d) => d.date < e.start && d.date >= isoAdd(e.start, -56)), after = all.filter((d) => d.date >= e.start && d.date <= end);
+  const needAfter = e.days ? Math.min(4, 2 * perWeek) : 7, needBefore = e.days ? Math.min(6, 3 * perWeek) : 14;
+  const out = { id: e.id, title: e.title, window: e.hours ? `${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}` : 'the whole day', days_after: after.length, days_before: before.length, need_after: needAfter, caveats: [] };
+  // Other experiments running at the same time make the result unattributable.
+  const overlapping = cleanExperiments(state.experiments).filter((o) => o.id !== e.id && o.start <= end && (!o.end || o.end >= e.start) && (!o.hours || !e.hours || (o.hours[0] < h1 && o.hours[1] > h0)));
+  if (before.length < needBefore) return { ...out, status: 'collecting', label: 'Not enough “before” days', detail: `Needs ${needBefore} comparable days in the 8 weeks before ${md(e.start)}; there are ${before.length}.` };
+  if (after.length < needAfter) return { ...out, status: 'collecting', label: 'Collecting', detail: `${after.length} of ${needAfter} comparable days so far${lastDate && lastDate < isoAdd(now ? new Date(now).toISOString().slice(0, 10) : e.start, -1) ? ` — import a newer Delmarva file (readings end ${md(lastDate)})` : ''}.` };
+  // Weather: fitted effect, matched days, or none.
+  const T = (d) => temps[d.date];
+  const bT = before.filter((d) => Number.isFinite(T(d))), aT = after.filter((d) => Number.isFinite(T(d)));
+  let adjust = (d) => 0, method = 'plain before/after average (no outdoor temperatures)';
+  if (bT.length >= 10 && aT.length === after.length) {
+    const xs = bT.map(T), ys = bT.map(val), mx = avg(xs), my = avg(ys), sxx = sum(xs.map((x) => (x - mx) ** 2));
+    const b = sxx > 0 ? sum(xs.map((x, i) => (x - mx) * (ys[i] - my))) / sxx : 0, res = ys.map((y, i) => y - my - b * (xs[i] - mx));
+    const se = sxx > 0 ? Math.sqrt(sum(res.map((r) => r * r)) / Math.max(1, xs.length - 2) / sxx) : Infinity;
+    const outside = aT.filter((d) => T(d) < Math.min(...xs) - 3 || T(d) > Math.max(...xs) + 3).length;
+    if (Math.abs(b) > 2 * se && outside <= after.length * 0.3) { adjust = (d) => b * (T(d) - mx); method = `before/after, adjusted for outdoor temperature (${fmt(b, 2)} kWh per °F in these hours, from ${bT.length} earlier days)`; }
+    else if (Math.abs(b) > 2 * se) out.caveats.push('The weather during the test was outside the range of the comparison days, so the weather adjustment can’t be trusted; the result is marked uncertain.');
+    else method = `before/after average; outdoor temperature showed no clear effect on these hours (${bT.length} earlier days)`;
+  }
+  const rb = before.map((d) => val(d) - adjust(d)), ra = after.map((d) => val(d) - adjust(d));
+  const diff = avg(ra) - avg(rb), se = Math.sqrt(sd(rb) ** 2 / rb.length + sd(ra) ** 2 / ra.length), lo = diff - 1.96 * se, hi = diff + 1.96 * se;
+  const mde = 2.8 * se; // the smallest change these days could reliably show
+  const expected = e.watts && (e.hoursPerDay || hrs) ? (e.watts * Math.min(e.hoursPerDay || hrs, hrs)) / 1000 : null; // kWh a day, from your stated wattage and hours
+  const perMonth = (k) => (k * perWeek * 30) / 7;
+  const rf = rateFor(state), $ = (k) => (rf.rate != null ? k * rf.rate : null);
+  Object.assign(out, { diff_kwh: r2(diff), ci: [r2(lo), r2(hi)], mde_kwh: r2(mde), method, before_kwh: r2(avg(before.map(val))), after_kwh: r2(avg(after.map(val))), expected_kwh: expected != null ? r2(expected) : null });
+  if (out.caveats.length) return { ...out, status: 'inconclusive', label: 'Inconclusive', detail: out.caveats[0] };
+  if (overlapping.length) return { ...out, status: 'confounded', label: 'Can’t be attributed', detail: `“${overlapping[0].title}” ran at the same time${overlapping.length > 1 ? `, with ${overlapping.length - 1} other change(s)` : ''}, so a difference can’t be credited to this change alone.` };
+  const missing = e.end ? isoGap(e.start, e.end) + 1 - after.length - e.exclude.length : null;
+  if (missing != null && missing > 0 && e.days == null) out.caveats.push(`${missing} day(s) in the test period had incomplete readings and were left out.`);
+  if (e.exclude.length) out.caveats.push(`${e.exclude.length} day(s) you marked as unusual were left out.`);
+  const money = (k) => { const v = $(perMonth(k)); return v != null ? `$${fmt(v, 2)}` : null; };
+  if (expected != null && expected < mde) {
+    const eng = perMonth(expected);
+    return { ...out, status: 'too_small', label: 'Too small for the meter to show', detail: `The change you described (${fmt(e.watts)} W for ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h a day ≈ ${fmt(expected, 2)} kWh a day) is smaller than the day-to-day swings in these hours (the meter could only show about ${fmt(mde, 2)} kWh a day or more). Hourly whole-home readings can’t confirm it.`,
+      engineering: { kwh_month: r1(eng), dollars: $(eng) != null ? r2($(eng)) : null, method: `Your stated ${fmt(e.watts)} W × ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h × ${fmt((perWeek * 30) / 7, 1)} days a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. An engineering estimate, not a measurement.` } };
+  }
+  if (hi < 0) {
+    const m = perMonth(-diff), mLo = perMonth(-hi), mHi = perMonth(-lo), longEnough = after.length >= (e.days ? 2 * perWeek : 14);
+    return { ...out, status: 'reduced', label: longEnough ? 'Measured reduction' : 'Early sign of a reduction', detail: `${fmt(-diff, 2)} kWh a day less in ${out.window} (95% range ${fmt(-hi, 2)}–${fmt(-lo, 2)}), over ${after.length} days vs ${before.length} before.${longEnough ? '' : ' Keep going: more days will firm this up.'}`,
+      monthly: { kwh: [r1(mLo), r1(mHi)], kwh_mid: r1(m), dollars: money(-hi) && money(-lo) ? [r2($(mLo)), r2($(mHi))] : null, method: `Measured kWh a day × ${fmt((perWeek * 30) / 7, 1)} days a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. Assumes the change continues and conditions stay similar.${e.cooling && state.profile.hvacMetered !== 'yes' ? ' Cooling may not be on your meter — unconfirmed — so the bill effect is uncertain.' : ''}` } };
+  }
+  if (lo > 0) return { ...out, status: 'increased', label: 'Use went up', detail: `${fmt(diff, 2)} kWh a day more in ${out.window} (95% range ${fmt(lo, 2)}–${fmt(hi, 2)}). The change didn’t help, or something else changed at the same time.` };
+  return { ...out, status: 'inconclusive', label: 'No clear difference', detail: `The difference (${diff >= 0 ? '+' : ''}${fmt(diff, 2)} kWh a day, 95% range ${fmt(lo, 2)} to ${fmt(hi, 2)}) is within normal day-to-day variation. The meter could only show about ${fmt(mde, 2)} kWh a day or more.${expected != null ? ` Your described change is about ${fmt(expected, 2)} kWh a day.` : ''}` };
 }

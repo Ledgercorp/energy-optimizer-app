@@ -202,6 +202,14 @@ function hero(st, rec) {
       <ol class="checklist"><li><span class="mark">1</span><div><b>Tell the app your routine</b><small>When you’re up, out and asleep.</small></div></li><li><span class="mark">2</span><div><b>Program your thermostat once</b><small>Guided, step by step, about 5 minutes.</small></div></li><li><span class="mark">3</span><div><b>The app keeps watch</b><small>Weather, savings and schedule changes are tracked automatically.</small></div></li></ol>
       <a class="btn primary" href="#setup">Get started</a></section>`;
   }
+  if (st.kind === 'hold') {
+    const t = st.thermostat;
+    return `<section class="hero ${t.mode}"><div class="hero-top"><span class="pill ${t.mode}">${modeName(t.mode)}</span><span class="hero-period">Confirmed by you${t.confirmed ? ` ${esc(shortDate(t.confirmed))}` : ''}</span></div>
+      <p class="hero-label">Actual thermostat</p><div class="hero-temp"><span class="big">${t.setpoint}°</span></div>
+      <p class="hero-next"><b>HOLD</b>, time-based programming <b>${t.programming === 'off' ? 'OFF' : 'ON'}</b>${t.recovery ? ` · Energy Management Recovery ${t.recovery.toUpperCase()}` : ''}${t.coolingPrice ? ` · Cooling price setting ${esc(t.coolingPrice)}` : ''}</p>
+      <div class="status ok">${ic.check}<div><b>Nothing to change</b><span>This is how you run it. The app never changes the thermostat; any test is optional and yours to set.</span></div></div>
+      <p class="fine">The weekly schedule in the app is an inactive proposal, not what’s on the thermostat. <a href="#schedule">See it</a> · <a href="#settings">Update your setting</a></p>${disconnected}</section>`;
+  }
   if (st.kind === 'error') return `<section class="hero"><span class="pill">Routine needs a fix</span><h2 class="hero-q">Your daily routine can’t be turned into a schedule</h2><p>${esc(st.message)}</p><a class="btn primary" href="#settings">Fix it in Settings</a>${disconnected}</section>`;
   if (st.kind === 'off') return `<section class="hero"><div class="hero-top"><span class="pill">Fan only</span></div><h2 class="hero-q">No heating or cooling to set right now</h2><p>The building isn’t heating or cooling. Keep the thermostat fan on AUTO. You’ll get a recommendation as soon as the building switches.</p><p class="hero-label">Has the building switched?</p>${seasonSeg('What the building provides')}${disconnected}</section>`;
   if (S.profile.buildingMode === 'unknown') {
@@ -283,7 +291,7 @@ function viewSchedule() {
   const rec = recNow();
   if (!rec.plans.length) return `${back('today', 'Today')}${pagehead('Weekly schedule')}<section class="card"><p>No heating or cooling schedule right now.</p></section>`;
   const st = A.todayStatus(S, rec);
-  return `${back('today', 'Today')}${pagehead('Weekly schedule', st.kind === 'ok' ? `Programmed ${esc(shortDate(st.programmedOn))}` : 'Not programmed yet')}
+  return `${back('today', 'Today')}${pagehead('Weekly schedule', st.kind === 'hold' ? 'Proposal only — your thermostat is on HOLD' : st.kind === 'ok' ? `Programmed ${esc(shortDate(st.programmedOn))}` : 'Not programmed yet')}${st.kind === 'hold' ? `<section class="card"><p>Inactive proposal. Your thermostat is held at ${S.profile.thermostat.setpoint}°F with programming off, by your choice. Nothing here is on the thermostat, and the app won’t change it.</p></section>` : ''}
     <div class="grid">${scheduleTables(rec)}</div>
     <section class="card"><h2>Thermostat model</h2><p>The guided steps are for the Emerson IntelliTEMP IT900 that Delmarva installed for Energy Wise Rewards. Another thermostat? Enter these same times and temperatures using its own instructions.</p><p class="fine">Reference: Delmarva’s <a href="${MANUAL_URL}" target="_blank" rel="noopener noreferrer">IT900 manual</a>.</p></section>
     <div class="row2 no-print"><a class="btn primary" href="#program">Program thermostat</a><button class="btn secondary" data-act="print">Print</button></div>`;
@@ -453,6 +461,14 @@ const ZSEASON = [['unknown', 'Not sure'], ['heat_available', 'Heating'], ['cool_
 const ZMET = [['unknown', 'Not sure'], ['yes', 'Yes'], ['partial', 'Partly (fan only)'], ['no', 'No — building pays']];
 const zsel = (z, f, opts) => `<select data-zone="${esc(z.id)}" data-f="${f}">${opts.map(([v, l]) => `<option value="${v}" ${z[f] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 const znum = (z, f) => `<input type="number" inputmode="numeric" min="40" max="95" data-zone="${esc(z.id)}" data-f="${f}" value="${getPath(z, f)}">`;
+function thermostatGroup() {
+  const t = S.profile.thermostat;
+  return group('Your thermostat, as you set it', 'What you see on the thermostat itself. The app records it and never changes the thermostat; the weekly schedule in the app stays a proposal unless you program it.',
+    `<label class="item"><span>Holding at (°F)</span><input type="number" inputmode="numeric" min="50" max="90" id="th-set" value="${t ? t.setpoint : ''}" placeholder="e.g. 74"></label>
+    <label class="item"><span>HOLD on</span><input type="checkbox" id="th-hold" ${t?.hold ? 'checked' : ''}></label>
+    <label class="item"><span>Time-based programming</span><select id="th-prog"><option value="off" ${t?.programming === 'off' ? 'selected' : ''}>Off</option><option value="on" ${t?.programming === 'on' ? 'selected' : ''}>On</option></select></label>
+    <div class="item"><button class="btn secondary" data-act="th-save">Save what the thermostat shows</button>${t ? ` <small>Last confirmed ${esc(shortDate(t.confirmed || todayIso()))}</small>` : ''}</div>`);
+}
 function zonesGroup() {
   const zs = S.zones || [];
   const ed = (z) => `<div class="zone"><label class="item"><span>Name</span><input data-zone="${esc(z.id)}" data-f="label" value="${esc(z.label)}" maxlength="40"></label>
@@ -535,7 +551,7 @@ function applyHouseholdNow(update) {
     if (!v.ok) throw new Error(`these didn’t save as intended: ${v.bad.join(', ')}`);
     lastCommit.what = 'household routine';
     if (LOCAL) fetch('/api/household-update/applied', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: update.id, verified: true, days: C.DOW.map((d) => [d, S.profile.routine.days[d]]) }) }).catch(() => {});
-    toast('Routine saved and verified on this device. The thermostat itself is unchanged — see Today for programming steps.');
+    toast(`Saved and verified on this device. The thermostat itself is unchanged${A.holdsSteady(S) ? '.' : ' — see Today for programming steps.'}`);
   } catch (err) { toast(`Not applied: ${err.message} Your data is unchanged.`, true); }
   pendingRestore = null; householdUpdate = null;
   location.hash = 'today';
@@ -594,16 +610,16 @@ function awayCards(all = false) {
 }
 
 const KIND_TAG = { measured: 'Measured', estimate: 'Estimate', statement: 'Statement', reconciled: 'Matched to readings', projection: 'Utility projection' };
-let stmtDraft = null; // { fields, found, notFound, source, name } from a PDF, shown for review before saving
+let stmtDraft = null; // { fields, found, notFound, name, editingId? } from a PDF or an existing statement, shown for review before saving
 const STMT_FIELDS = [['supply', 'Supply charges ($)'], ['delivery', 'Delivery charges ($)'], ['fixed', 'Customer / fixed charge ($)'], ['taxes', 'Taxes and fees ($)'], ['credits', 'Credits ($, as a positive number)'], ['adjustments', 'Adjustments ($, minus for a reduction)'], ['priorBalance', 'Previous balance ($)'], ['payments', 'Payments ($)'], ['totalDue', 'Total amount due ($)']];
 function viewBills() {
   const head = pagehead('Bills', 'Statements, projections and estimates — kept apart');
   if (!usageDays().length) return `${head}<section class="card"><p>Import your Delmarva file to see your electricity month by month.</p>${importButton()}</section>`;
   const bv = A.billView({ state: S, temps: allTemps() });
-  const d = stmtDraft?.fields || {}, v = (k) => (d[k] == null || d[k] === '' ? '' : esc(String(d[k]))), flag = (k) => (stmtDraft ? (stmtDraft.found.includes(k) ? ' <small class="found">read from the PDF — check it</small>' : ' <small>not found in the PDF</small>') : '');
+  const d = stmtDraft?.fields || {}, v = (k) => (d[k] == null || d[k] === '' ? '' : esc(String(d[k]))), flag = (k) => (stmtDraft && !stmtDraft.editingId ? (stmtDraft.found.includes(k) ? ' <small class="found">read from the PDF — check it</small>' : ' <small>not found in the PDF</small>') : '');
   const monthRows = bv.months.map((m) => `<tr><td>${esc(new Date(`${m.month}-15T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }))}${m.partial ? ` <small>(${m.days} of ${m.daysInMonth} days)</small>` : ''}</td><td class="t">${num(m.kwh)}</td><td class="t">${num(m.kwh_per_day, 1)}</td><td class="t">${m.interval_cost != null ? money(m.interval_cost) : '—'}</td></tr>`).join('');
-  const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(from PDF)</small>' : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.cost_per_day != null ? money(x.cost_per_day) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td><td class="t">${x.cents_per_kwh != null ? num(x.cents_per_kwh, 1) + '¢' : '—'}</td></tr>
-    <tr class="sub"><td colspan="7">${x.readings_kwh != null ? `<small>Your readings for the same days: ${num(x.readings_kwh)} kWh${x.kwh_matches === false ? ' — more than rounding apart' : x.kwh_matches ? ' — matches' : ''}.</small> ` : ''}${x.fixed != null ? `<small>Fixed ${money(x.fixed)}.</small> ` : ''}${x.credits ? `<small>Credits ${money(x.credits)}.</small> ` : ''}${x.priorBalance != null || x.payments != null ? `<small>Previous balance/payments are kept out of comparisons.</small> ` : ''}${x.notes.map((n) => `<small>${esc(n)}</small>`).join(' ')} <button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove</button></td></tr>`).join('');
+  const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(from PDF)</small>' : ''}${x.statementDate ? ` <small>billed ${esc(shortDate(x.statementDate))}</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.cost_per_day != null ? money(x.cost_per_day) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td><td class="t">${x.cents_per_kwh != null ? num(x.cents_per_kwh, 1) + '¢' : '—'}</td></tr>
+    <tr class="sub"><td colspan="7">${x.readings_kwh != null ? `<small>Your readings for the same days: ${num(x.readings_kwh)} kWh${x.kwh_matches === false ? ' — more than rounding apart' : x.kwh_matches ? ' — matches' : ''}.</small> ` : ''}${x.fixed != null ? `<small>Fixed ${money(x.fixed)}.</small> ` : ''}${x.credits ? `<small>Credits ${money(x.credits)}.</small> ` : ''}${x.priorBalance != null || x.payments != null ? `<small>Previous balance/payments are kept out of comparisons.</small> ` : ''}${x.notes.map((n) => `<small>${esc(n)}</small>`).join(' ')} <button class="link" data-act="bill-edit" data-id="${esc(x.id)}">Correct</button> · <button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove</button></td></tr>`).join('');
   const drivers = bv.compare ? `<section class="card"><p class="card-label">Why the last bill changed</p><p>${money(bv.compare.prev.amount)} → ${money(bv.compare.cur.amount)} (${bv.compare.total >= 0 ? '+' : '−'}${money(Math.abs(bv.compare.total))})</p><ul class="bullets">${bv.compare.drivers.map((x) => `<li>${esc(x.label)}${x.amount != null ? `: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}` : ''} <small>(${x.status === 'confirmed' ? 'from your statements' : x.status === 'possible' ? 'possible, not measured' : x.status === 'unknown' ? 'can’t compare' : 'not explained by the figures entered'})</small></li>`).join('')}</ul>${bv.compare.typical_cost_per_day != null ? `<p class="fine">Your earlier statements cost about ${money(bv.compare.typical_cost_per_day)} a day (median).</p>` : ''}</section>` : '';
   const proj = bv.projection, est = bv.estimate;
   return `${head}
@@ -616,10 +632,11 @@ function viewBills() {
     <h2 class="section-title">Your statements</h2><section class="card">
       ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Service period</th><th class="t">Charges</th><th class="t">Days</th><th class="t">kWh</th><th class="t">$/day</th><th class="t">kWh/day</th><th class="t">¢/kWh</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements yet. Add one below — from the PDF on your Mac, or by typing a few numbers.</p>'}
       ${LOCAL ? `<label class="btn secondary file">Read a statement PDF<input type="file" id="statement-pdf" accept="application/pdf"></label><p class="fine">Read on this Mac only (macOS PDFKit); nothing is uploaded. Scanned PDFs have no text to read — type those figures in.</p>` : '<p class="fine">PDF reading works in the Mac companion; on the phone, type the figures.</p>'}
-      ${stmtDraft ? `<p class="fine"><b>From ${esc(stmtDraft.name)}:</b> found ${stmtDraft.found.length} item${stmtDraft.found.length === 1 ? '' : 's'}. Check every field against the statement before saving.</p>` : ''}
+      ${stmtDraft?.editingId ? `<p class="fine"><b>Correcting the statement ending ${esc(shortDate(stmtDraft.fields.end))}.</b> Saving replaces it; you can undo from Settings.</p>` : stmtDraft ? `<p class="fine"><b>From ${esc(stmtDraft.name)}:</b> found ${stmtDraft.found.length} item${stmtDraft.found.length === 1 ? '' : 's'}. Check every field against the statement before saving.</p>` : ''}
       <div class="bill-form"><label class="item"><span>Service start date${flag('start')}</span><input type="date" id="bill-start" value="${v('start')}"></label><label class="item"><span>Service end date${flag('end')}</span><input type="date" id="bill-end" value="${v('end')}"></label>
       <label class="item"><span>Current charges ($)${flag('amount')}<br><small>This period only — not the amount due</small></span><input type="number" inputmode="decimal" id="bill-amount" min="0" step="0.01" value="${v('amount')}"></label>
       <label class="item"><span>Billed kWh${flag('kwh')}</span><input type="number" inputmode="decimal" id="bill-kwh" min="0" value="${v('kwh')}"></label>
+      <label class="item"><span>Statement date <small>(optional)</small>${flag('statementDate')}</span><input type="date" id="bill-statementDate" value="${v('statementDate')}"></label>
       <label class="item"><span>Billed days <small>(optional)</small>${flag('days')}</span><input type="number" inputmode="numeric" id="bill-days" min="1" max="99" value="${v('days')}"></label>
       <details ${stmtDraft ? 'open' : ''}><summary>More from the statement (optional)</summary>${STMT_FIELDS.map(([k, l]) => `<label class="item"><span>${l}${flag(k)}</span><input type="number" inputmode="decimal" step="0.01" id="bill-${k}" value="${v(k)}"></label>`).join('')}
         <label class="item"><span>Estimated meter reading${flag('estimatedRead')}</span><input type="checkbox" id="bill-estimated" ${d.estimatedRead ? 'checked' : ''}></label></details>
@@ -651,7 +668,7 @@ const range$ = (d) => (d ? (Math.abs(d[0] - d[1]) < 0.5 ? usd(d[1]) : `${usd(d[0
 function savingLine(o) {
   const sv = o.savings;
   if (sv.dollars) return `${range$(sv.dollars)} a ${sv.per === 'summer month' ? 'summer month' : 'month'} · ${sv.label.toLowerCase()}`;
-  return `Can’t be estimated yet${sv.upTo != null ? ` (at most ${usd(sv.upTo)} a month)` : ''}`;
+  return `Can’t be estimated yet${sv.upTo != null ? ` (measured ceiling: ${usd(sv.upTo)} a month, if all of it were avoidable)` : ''}`;
 }
 const EFFORT = { none: 'No effort', low: 'Low effort', medium: 'Some effort', high: 'High effort' }, COMFORT = { none: 'No comfort change', slight: 'Slightly warmer/cooler', noticeable: 'Noticeable comfort change' };
 /** How much am I using · what will the bill be · why higher or lower · what could I save. Every number says where it comes from. */
@@ -675,30 +692,66 @@ function billFirstCard() {
     why = `<p>Your use dipped to ${num(b.low_stretch.kwh, 1)} kWh a day from ${esc(shortDate(b.low_stretch.from))} to ${esc(shortDate(b.low_stretch.to))}, then came back to normal. A bill covering mostly that stretch would be lower and the next one back to usual — <i>likely, but unconfirmed</i> until you add statements with their dates.</p><p class="fine">Your price per kWh in the file was flat (same every hour), so this isn’t a rate effect.</p>`;
   } else why = `<p>${b && b.status !== 'insufficient' ? esc(b.headline) : 'More readings and a statement are needed to explain bill changes.'}</p>`;
   const top = sp.items.slice(0, 2);
-  const save = top.length ? `${sp.normal ? '<p class="fine">Your use is normal for your home — normal isn’t the same as efficient.</p>' : ''}<ul class="opps">${top.map((o) => `<li><b>${esc(o.action)}</b><small>${esc(savingLine(o))} · ${esc(CONF[o.confidence])} · ${esc(EFFORT[o.effort])}</small></li>`).join('')}</ul><a class="btn plain" href="#savings">All savings options ›</a>`
+  const save = top.length ? `${sp.normal ? '<p class="fine">Your use is normal for your home — normal isn’t the same as efficient.</p>' : ''}<ul class="opps">${top.slice(0, 1).map((o) => `<li><b>${esc(o.action)}</b><small>${esc(savingLine(o))} · ${esc(EFFORT[o.effort])}${o.experiment ? ' · can be tested' : ''}</small></li>`).join('')}</ul><a class="btn plain" href="#savings">Test a change ›</a>`
     : `<p>No change is clearly worth it from your readings right now.</p><a class="btn plain" href="#savings">What was considered ›</a>`;
+  const running = (S.experiments || []).filter((e) => !e.end);
+  const th = S.profile.thermostat, sp0 = sp.items.find((o) => o.id === 'setpoint');
+  const thermoLine = th ? q('Thermostat', `<p><b>Actual: ${th.setpoint}°F HOLD, programming ${th.programming === 'off' ? 'OFF' : 'ON'}</b> <small>(confirmed by you)</small></p>${sp0 && !running.some((e) => /°F instead of/.test(e.title)) ? `<p class="fine">Optional test: try ${th.setpoint + 1}°F for two warm weeks — only if you want to; the app won’t change it. <a href="#savings">Details</a></p>` : ''}`) : '';
+  const testing = running.length ? q('Your test', running.map((e) => { const r = expEval(e); return `<p><b>${esc(e.title)}</b> — ${esc(r.label)}. <small>${esc(r.detail || '')}</small></p>`; }).join('') + '<a class="btn plain" href="#savings">See the test ›</a>') : '';
   return `<section class="card billfirst">${q('How much are you using?', use)}${q('What will the bill be?', lines.join(''))}<a class="btn plain" href="#bills">Bills and statements ›</a>
-    ${q('Why higher or lower?', why)}${q('What could you save?', save)}</section>`;
+    ${q('Why higher or lower?', why)}${q('What could you save?', save)}${testing}${thermoLine}</section>`;
 }
 
 // ---------- Savings tab ----------
+let expDraft = null; // prefilled "try a change" form
+const HOURS = Array.from({ length: 25 }, (_, h) => [h, h === 24 ? 'midnight' : C.fmtMin(h * 60)]);
+const DAYS = [['', 'Every day'], ...C.DOW.map((d, i) => [String(i), `${C.DAY_NAME[d]}s only`])];
+const CONTROL = { yes: 'Yes — you control it', partly: 'Partly', unknown: 'Unknown until you find what it is', no: 'No' };
+const expEval = (e) => A.evaluateExperiment({ state: S, temps: allTemps(), exp: e });
+function expCard(e) {
+  const r = expEval(e), running = !e.end;
+  const money2 = r.monthly?.dollars ? ` ≈ ${money(r.monthly.dollars[0])}–${money(r.monthly.dollars[1])} a month` : '';
+  return `<li><b>${esc(e.title)}</b> <span class="kind-chip">${running ? 'Running' : 'Ended'} · ${esc(r.label)}</span>
+    <small>${esc(r.window ? `${r.window}${e.days ? `, ${C.DAY_NAME[C.DOW[e.days[0]]]}s` : ''}` : '')} · started ${esc(shortDate(e.start))}${e.end ? `, ended ${esc(shortDate(e.end))}` : ''}</small>
+    <p>${esc(r.detail || '')}</p>
+    ${r.monthly ? `<p class="fine">If it continues: ${num(r.monthly.kwh[0], 1)}–${num(r.monthly.kwh[1], 1)} kWh a month${money2}. ${esc(r.monthly.method)}</p>` : ''}
+    ${r.engineering ? `<p class="fine">Engineering estimate: ${num(r.engineering.kwh_month, 1)} kWh a month${r.engineering.dollars != null ? ` ≈ ${money(r.engineering.dollars)}` : ''}. ${esc(r.engineering.method)}</p>` : ''}
+    ${r.method ? `<p class="fine">How it was compared: ${esc(r.method)}.${(r.caveats || []).map((c) => ` ${esc(c)}`).join('')}</p>` : ''}
+    <div class="row2">${running ? `<button class="btn secondary" data-act="exp-end" data-id="${esc(e.id)}">End the test</button><label class="item"><span>Mark an unusual day (away, guests)</span><input type="date" data-exp-exclude="${esc(e.id)}"></label>`
+      : e.decision ? `<p class="fine">You decided to ${e.decision === 'keep' ? 'keep this change' : 'go back'}. <button class="link" data-act="exp-decide" data-id="${esc(e.id)}" data-v="">Change</button></p>`
+        : `<button class="btn primary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="keep">Keep the change</button><button class="btn secondary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="revert">Go back</button>`}</div></li>`;
+}
+function expForm() {
+  const d = expDraft || {};
+  const sel = (id, opts, cur) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  return `<section class="card" id="exp-form"><p class="card-label">Try a change and measure it</p>
+    <p class="fine">Pick one change, start it today, and keep everything else as usual. The app compares the same hours with the weeks before, allowing for the weather. Import a newer Delmarva file after a week or two to see the result.</p>
+    <div class="bill-form"><label class="item"><span>What will you change?</span><input id="exp-title" maxlength="160" value="${esc(d.title || '')}" placeholder="e.g. switch off the old TV box overnight"></label>
+    <label class="item"><span>From</span>${sel('exp-h0', HOURS.slice(0, 24), d.hours ? d.hours[0] : '')}</label><label class="item"><span>Until</span>${sel('exp-h1', HOURS.slice(1), d.hours ? d.hours[1] : 24)}</label>
+    <label class="item"><span>Days</span>${sel('exp-days', DAYS, d.days ? d.days[0] : '')}</label>
+    <details><summary>The device’s wattage, if you know it (optional)</summary><label class="item"><span>Watts (from its label)</span><input type="number" inputmode="numeric" id="exp-watts" min="1" value="${d.watts || ''}"></label><label class="item"><span>Hours a day it ran</span><input type="number" inputmode="decimal" id="exp-hpd" min="0.5" max="24" step="0.5" value="${d.hoursPerDay || ''}"></label><p class="fine">Lets the app tell you when a change is too small for the meter to show, and estimate it instead.</p></details>
+    <label class="item"><span>Involves heating or cooling</span><input type="checkbox" id="exp-cool" ${d.cooling ? 'checked' : ''}></label>
+    <label class="item"><span>Start date</span><input type="date" id="exp-start" value="${esc(d.start || todayIso())}"></label>
+    <button class="btn primary" data-act="exp-start">Start the test</button></div></section>`;
+}
 function viewSavingsTab() {
-  const out = [pagehead('Savings', 'What’s worth changing — and how we’ll know')];
+  const out = [pagehead('Savings', 'Test a change — the meter shows whether it worked')];
   if (!usageDays().length) return `${out.join('')}<section class="card"><p>Import your Delmarva file first; savings are worked out from your own readings.</p>${importButton()}</section>`;
-  const sp = planNow();
+  const sp = planNow(), exps = (S.experiments || []).slice().reverse();
   if (sp.note) out.push(`<section class="card good"><p>${esc(sp.note)}</p></section>`);
-  out.push(`<h2 class="section-title">Worth considering</h2>`);
-  if (!sp.items.length) out.push('<section class="card"><p>No change is clearly worth it from your readings right now.</p></section>');
-  for (const o of sp.items) {
-    const tracked = (S.actions || []).some((a) => a.id === `savings:${o.id}`);
-    out.push(`<section class="card opp"><h2>${esc(o.action)}</h2><p>${esc(o.why)}</p>
-      <dl class="facts"><dt>Possible saving</dt><dd>${esc(savingLine(o))}</dd><dt>How it’s worked out</dt><dd>${esc(o.savings.method)}</dd><dt>Confidence</dt><dd>${esc(CONF[o.confidence])}</dd><dt>Effort</dt><dd>${esc(EFFORT[o.effort])}</dd><dt>Comfort</dt><dd>${esc(COMFORT[o.comfort])}</dd><dt>How we’ll know</dt><dd>${esc(o.verify)}</dd></dl>
-      ${o.caveat ? `<p class="fine">${esc(o.caveat)}</p>` : ''}${o.thermostat ? '<p class="fine">Involves the thermostat — the app never changes it; you do.</p>' : ''}
-      ${tracked ? '<p class="fine">You’re trying this — see “Measured results”.</p>' : `<button class="btn secondary" data-act="track" data-id="savings:${esc(o.id)}" data-key="savings" data-title="${esc(o.action)}" data-hours="">I’ll try this</button>`}</section>`);
-  }
-  out.push(`<h2 class="section-title">Looked at, not worth it now</h2><section class="card"><ul class="bullets">${sp.considered.map((c) => `<li><b>${esc(c.what)}</b> — ${esc(c.why)}</li>`).join('')}</ul></section>`);
+  const active = exps.filter((e) => !e.end), done = exps.filter((e) => e.end);
+  if (active.length) out.push(`<h2 class="section-title">Running now</h2><section class="card"><ul class="findings exps">${active.map(expCard).join('')}</ul></section>`);
+  out.push(`<h2 class="section-title">Worth looking into</h2>`);
+  if (!sp.items.length) out.push('<section class="card"><p>Nothing in your readings clearly points to a saving right now.</p></section>');
+  for (const o of sp.items) out.push(`<section class="card opp"><h2>${esc(o.action)}</h2><p>${esc(o.why)}</p>
+    <dl class="facts"><dt>Evidence</dt><dd>${esc(o.evidence || '')}</dd><dt>Can you control it?</dt><dd>${esc(CONTROL[o.control] || o.control)}</dd><dt>Possible saving</dt><dd>${esc(savingLine(o))}</dd><dt>How it’s worked out</dt><dd>${esc(o.savings.method)}</dd><dt>Confidence in the evidence</dt><dd>${esc(CONF[o.confidence])}</dd><dt>Cost and effort</dt><dd>${esc(o.cost)} · ${esc(EFFORT[o.effort])}</dd><dt>Comfort</dt><dd>${esc(COMFORT[o.comfort])}</dd><dt>How we’ll know</dt><dd>${esc(o.verify)}</dd></dl>
+    ${o.thermostat ? '<p class="fine">Involves the thermostat — the app never changes it; you do.</p>' : ''}
+    ${o.experiment ? `<button class="btn secondary" data-act="exp-prefill" data-src="${esc(o.id)}">Test this</button>` : ''}</section>`);
+  out.push(expForm());
+  if (done.length) out.push(`<h2 class="section-title">Finished tests</h2><section class="card"><ul class="findings exps">${done.map(expCard).join('')}</ul></section>`);
+  out.push(`<h2 class="section-title">Looked at, not worth it now</h2><section class="card"><ul class="bullets">${sp.considered.map((c) => `<li><b>${esc(c.what)}</b> — ${esc(c.why)}${c.experiment ? ` <button class="link" data-act="exp-prefill" data-src="${esc(c.id)}">Test it anyway</button>` : ''}</li>`).join('')}</ul></section>`);
   const acts = actsList();
-  out.push(`<h2 class="section-title">Measured results</h2>${acts ? `<section class="card"><ul class="findings actions">${acts}</ul><p class="fine">Compared with the 4 weeks before you started, at similar weather where possible. “Consistent with an improvement” is not proof.</p></section>` : '<section class="card"><p>Nothing tracked yet. Choose “I’ll try this” above to measure a change.</p></section>'}`);
+  if (acts) out.push(`<h2 class="section-title">Earlier tracked actions</h2><section class="card"><ul class="findings actions">${acts}</ul></section>`);
   out.push(viewSavings().replace(/^.*?<\/header>/s, '<h2 class="section-title">Thermostat schedule results</h2>'));
   return out.join('');
 }
@@ -858,7 +911,8 @@ function savedBanner() {
   if (!savedNote || Date.now() - savedNote.at > 120e3) return '<div id="saved" aria-live="polite"></div>';
   const st = A.todayStatus(S, recNow());
   const todo = st.kind === 'update' || st.kind === 'program';
-  const tail = st.kind === 'update' ? 'Your thermostat schedule changed. <a href="#today">Update it from Today</a>.'
+  const tail = st.kind === 'hold' ? `Thermostat on HOLD at ${S.profile.thermostat.setpoint}°F, programming off (confirmed by you).`
+    : st.kind === 'update' ? 'Your thermostat schedule changed. <a href="#today">Update it from Today</a>.'
     : st.kind === 'program' ? 'Program your thermostat from <a href="#today">Today</a> when you’re ready.'
       : st.kind === 'ok' ? 'Your programmed thermostat schedule still matches.' : '';
   return `<div id="saved" aria-live="polite"><div class="saved ${todo ? 'todo' : ''}">${todo ? ic.alert : ic.check}<div><b>Saved: ${esc(savedNote.what)}</b>${tail}</div></div></div>`;
@@ -888,6 +942,7 @@ function viewSettings() {
     ${routineSection()}`;
   const right = `
     ${group('Electricity data', 'Used only on this device to measure what’s working.', `<div class="item"><span>Latest data</span><span class="value">${days.length ? `${esc(dayLabel(days[days.length - 1].date))} · ${days.length} days` : 'None yet'}</span></div><div class="item col">${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}<details class="inline"><summary>How to get the file from Delmarva</summary>${HOW_TO_DOWNLOAD}</details></div>${days.length ? '<button class="item danger" data-act="clear-usage">Delete electricity data</button>' : ''}`)}
+    ${thermostatGroup()}
     ${zonesGroup()}
     ${group('Privacy and backup', 'Your settings and electricity data stay on this device. The app only downloads public weather for Wilmington; nothing personal is sent anywhere.', `<div class="item col"><div class="row2"><button class="btn primary" data-act="export">Save backup</button><label class="btn secondary file">Restore or merge<input type="file" id="backup-file" accept=".json,application/json"></label></div><p class="fine">Moving between your Mac and iPhone: save a backup on one, then “Restore or merge” on the other. You’ll see what will be added and choose anything that conflicts; nothing is replaced unless you ask.</p>${hasSnapshot() ? '<button class="btn plain" data-act="undo-last">Undo the last merge, restore or routine update</button>' : ''}</div>`)}
     ${disclosure('advanced', 'Advanced', advanced)}
@@ -1196,14 +1251,63 @@ const ACTIONS = {
     const end = v('bill-end'), start = v('bill-start'), amount = num0('bill-amount');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(end) || amount == null || !(amount >= 0)) return toast('Enter at least the service end date and this period’s charges.', true);
     if (start && start >= end) return toast('The start date must be before the end date.', true);
-    const rec = { id: `${end}|${amount}`, start, end, amount, kwh: num0('bill-kwh'), days: num0('bill-days'), estimatedRead: !!document.getElementById('bill-estimated')?.checked, source: stmtDraft ? 'pdf' : 'manual', at: todayIso() };
+    const editingId = stmtDraft?.editingId || null;
+    const rec = { id: editingId || `${end}|${amount}|${Date.now().toString(36)}`, start, end, amount, kwh: num0('bill-kwh'), days: num0('bill-days'), statementDate: v('bill-statementDate'), estimatedRead: !!document.getElementById('bill-estimated')?.checked, source: stmtDraft && !editingId ? 'pdf' : (stmtDraft?.fields?.source || 'manual'), at: todayIso() };
     for (const [k] of STMT_FIELDS) rec[k] = num0(`bill-${k}`);
-    if ((S.bills || []).some((x) => x.end === end && x.amount === amount)) return toast('That statement is already saved.', true);
-    const next = A.cleanBills([...(S.bills || []), rec]);
-    if (next.length !== (S.bills || []).length + 1) return toast('That statement couldn’t be saved — check the numbers.', true);
-    S.bills = next; stmtDraft = null; save(); render(); toast('Statement saved on this device.');
+    const c = A.statementConflicts(S.bills || [], rec, { editingId });
+    if (c.invalid) return toast('That statement couldn’t be saved — check the numbers.', true);
+    if (c.duplicate) return toast('That statement is already saved.', true);
+    let list = (S.bills || []).filter((x) => x.id !== editingId);
+    if (c.revision) {
+      if (!confirm(`A statement for the same service period (ending ${shortDate(c.revision.end)}, ${money(c.revision.amount)}) is already saved. Replace it with this one (${money(amount)})? A copy is kept so you can undo.`)) return;
+      list = list.filter((x) => x.id !== c.revision.id);
+    }
+    try { commitAndReload({ ...S, bills: A.cleanBills([...list, rec]) }, editingId ? 'statement correction' : 'statement'); } catch (err) { return toast(`Not saved: ${err.message} Your data is unchanged.`, true); }
+    stmtDraft = null; render();
+    toast(`${editingId || c.revision ? 'Statement replaced' : 'Statement saved'} on this device.${c.overlaps.length ? ' It overlaps another statement’s dates — both are kept and flagged.' : ''} You can undo from Settings.`);
+  },
+  'bill-edit'(el) {
+    const b = (S.bills || []).find((x) => x.id === el.dataset.id);
+    if (!b) return;
+    stmtDraft = { fields: { ...b }, found: [], notFound: [], name: 'your saved statement', editingId: b.id };
+    render(); document.getElementById('bill-end')?.scrollIntoView({ block: 'center' });
   },
   'bill-draft-clear'() { stmtDraft = null; render(); },
+  'th-save'() {
+    const prev = S.profile.thermostat || {}, v = (id) => document.getElementById(id);
+    const t = A.cleanThermostat({ ...prev, mode: S.profile.buildingMode === 'heat_available' ? 'heat' : 'cool', setpoint: +v('th-set')?.value, hold: !!v('th-hold')?.checked, programming: v('th-prog')?.value, confirmed: todayIso() });
+    if (!t) return toast('Enter the temperature shown on the thermostat (50–90°F).', true);
+    try { commitAndReload({ ...S, profile: { ...S.profile, thermostat: t } }, 'thermostat'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    render(); toast(`Saved: ${t.setpoint}°F${t.hold ? ' HOLD' : ''}, programming ${t.programming}. The thermostat itself is unchanged.`);
+  },
+
+  'exp-prefill'(el) {
+    const sp = planNow(), o = [...sp.items, ...sp.considered].find((x) => x.id === el.dataset.src);
+    if (!o?.experiment) return;
+    expDraft = { ...o.experiment, start: todayIso() };
+    render(); document.getElementById('exp-form')?.scrollIntoView({ block: 'start' });
+  },
+  'exp-start'() {
+    const v = (id) => document.getElementById(id)?.value ?? '';
+    const title = v('exp-title').trim(), h0 = +v('exp-h0'), h1 = +v('exp-h1'), dd = v('exp-days'), start = v('exp-start');
+    if (!title) return toast('Describe the change in a few words.', true);
+    if (!(h1 > h0)) return toast('“Until” must be after “From”.', true);
+    const e = { id: `x${Date.now().toString(36)}`, title, start: start || todayIso(), hours: h0 === 0 && h1 === 24 ? null : [h0, h1], days: dd === '' ? null : [+dd],
+      watts: +v('exp-watts') || null, hoursPerDay: +v('exp-hpd') || null, cooling: !!document.getElementById('exp-cool')?.checked, at: todayIso() };
+    const overlap = (S.experiments || []).find((o) => !o.end);
+    if (overlap && !confirm(`“${overlap.title}” is still running. Two changes at once can’t be told apart — start anyway?`)) return;
+    try { commitAndReload({ ...S, experiments: A.cleanExperiments([...(S.experiments || []), e]) }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    expDraft = null; render(); toast('Test started. Keep everything else as usual; import a newer Delmarva file in a week or two.');
+  },
+  'exp-end'(el) {
+    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, end: todayIso() < e.start ? e.start : todayIso() } : e)));
+    save(); render(); toast('Test ended. The result uses the days up to today.');
+  },
+  'exp-decide'(el) {
+    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, decision: el.dataset.v || null } : e)));
+    save(); render();
+  },
+
   'usual-save'() {
     const lo = +document.getElementById('usual-low')?.value, hi = +document.getElementById('usual-high')?.value;
     if (!(lo > 0) || !(hi >= lo)) return toast('Enter a low and a high amount.', true);
@@ -1404,6 +1508,11 @@ document.addEventListener('change', async (e) => {
     return;
   }
   if (el.id === 'backup-file' && el.files[0]) return openRestoreFile(el.files[0]);
+  if (el.dataset.expExclude && el.value) {
+    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.expExclude ? { ...e, exclude: [...new Set([...(e.exclude || []), el.value])] } : e)));
+    save(); render(); toast('That day is left out of the comparison.');
+    return;
+  }
   if (el.id === 'statement-pdf' && el.files[0]) {
     const f = el.files[0];
     toast('Reading the statement on this Mac…');
