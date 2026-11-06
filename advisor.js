@@ -36,6 +36,7 @@ export function migrate(raw) {
     id: str(z.id, 20), label: str(z.label, 40) || 'Zone', hvacType: HV.includes(z.hvacType) ? z.hvacType : 'unknown', availability: z.availability in C.BUILDING_MODES ? z.availability : 'unknown',
     use: str(z.use, 60), metered: MET.includes(z.metered) ? z.metered : 'unknown', heat: temp(z.heat, dc.heat), cool: temp(z.cool, dc.cool) }));
   s.moveIn = isDate(raw?.moveIn) ? raw.moveIn : '';
+  s.appliedUpdates = arr(raw?.appliedUpdates).filter((x) => typeof x === 'string').slice(-20).map((x) => x.slice(0, 60));
   s.version = STATE_VERSION;
   return s;
 }
@@ -147,6 +148,7 @@ export function unusualDays(model, recentDays = 45) {
     .sort((a, b) => (b.kwh - b.expected) - (a.kwh - a.expected)).slice(0, 2);
 }
 
+const wRange = (lo, hi) => (fmt(Math.max(lo, hi)) === fmt(lo) ? fmt(lo) : `${fmt(lo)}–${fmt(Math.max(lo, hi))}`);
 const fmt = (n, d = 0) => n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
 const dayName = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 
@@ -875,17 +877,44 @@ export function riseTests(ctx, days = 10) {
     recent_temp_f: r1(tb(recent)), before_temp_f: r1(tb(before)),
     ...(() => { const ce = withT.length >= 6 && spread >= 6 ? coldEffect(withT.map((x) => x.temp), withT.map((x) => x.extra)) : { r: null, pct: null }; return { colder_more_r: r2(ce.r), cold_effect_pct: r0(ce.pct) }; })(), temperature_range_f: r0(spread),
     biggest_day: top ? { date: top.date, extra_kwh: r1(top.extra) } : null, biggest_day_share_pct: extraSum > 0 && top ? r0((Math.max(0, top.extra) / extraSum) * 100) : null,
-    days_above_usual: ex.filter((x) => x.extra > 0.1 * base).length, start_detected: k0 !== all.length - days,
+    days_above_usual: ex.filter((x) => x.extra > 0.1 * base).length, start_detected: !!(cp && cp.z >= 2.5),
     // Steady vs. bursty: did the quietest hour of the busiest-changing window rise (a sustained draw) or mainly its peak hour?
     sustained_rise_watts: r0(winStat(recent, blocks[largest[0]], Math.min) - winStat(before, blocks[largest[0]], Math.min)),
     peak_rise_watts: r0(winStat(recent, blocks[largest[0]], Math.max) - winStat(before, blocks[largest[0]], Math.max)),
     daytime_floor_rise_watts: r0(winStat(recent, [8, 22], Math.min) - winStat(before, [8, 22], Math.min)),
     floor_change_watts: r0(floor(recent) - floor(before)),
+    ...windowWeather(ctx, recent, before, blocks[largest[0]]),
+  };
+}
+
+/** For the window where use changed most: compared at the same outdoor temperature, its relation to temperature, a hot-summer reference, and how the extra is spread over days and hours. Daily mean temperatures only; nothing is estimated. */
+function windowWeather(ctx, recent, before, [a, b]) {
+  const T = (d) => ctx.temps[d.date], W = (d) => avg(d.h.slice(a, b)) * 1000;
+  const rT = recent.filter((d) => Number.isFinite(T(d))), bT = before.filter((d) => Number.isFinite(T(d)));
+  const pairs = rT.map((d) => { const m = bT.filter((x) => Math.abs(T(x) - T(d)) <= 3); return m.length >= 2 ? [W(d), avg(m.map(W))] : null; }).filter(Boolean);
+  const mAfter = pairs.length ? avg(pairs.map((p) => p[0])) : null, mBefore = pairs.length ? avg(pairs.map((p) => p[1])) : null;
+  const rel = (ds) => (ds.length >= 8 && Math.max(...ds.map(T)) - Math.min(...ds.map(T)) >= 6 ? r2(corr(ds.map(T), ds.map(W))) : null);
+  const hist = hourlyByDay(ctx.state.usage, C.dailyTotals(ctx.state.usage).filter((d) => d.complete).map((d) => d.date)).filter((d) => ctx.temps[d.date] >= 75);
+  const prof = Array.from({ length: 24 }, (_, h) => avg(before.map((d) => d.h[h])));
+  const hoursUp = recent.map((d) => d.h.filter((v, h) => (v - prof[h]) * 1000 > 300).length);
+  const medBefore = median(before.map(W));
+  const wkend = (d) => [0, 6].includes(new Date(`${d.date}T12:00:00Z`).getUTCDay());
+  const ch = (f) => r0(avg(recent.filter(f).map(W)) - avg(before.filter(f).map(W)));
+  return {
+    window: `${String(a).padStart(2, '0')}:00–${String(b).padStart(2, '0')}:00`, window_watts_before: r0(avg(before.map(W))), window_watts_after: r0(avg(recent.map(W))),
+    same_temp_days: pairs.length, same_temp_watts_after: r0(mAfter), same_temp_watts_before: r0(mBefore), same_temp_change_pct: pairs.length ? r0(((mAfter - mBefore) / mBefore) * 100) : null,
+    hotter_more_r_before: rel(bT), hotter_more_r_after: rel(rT),
+    hot_days_reference: hist.length, hot_days_window_watts: hist.length ? r0(avg(hist.map(W))) : null,
+    days_window_above_usual: recent.filter((d) => W(d) > medBefore).length, typical_hours_elevated: median(hoursUp),
+    weekday_window_change_watts: ch((d) => !wkend(d)), weekend_window_change_watts: ch(wkend),
+    night_change_watts: r0((avg(recent.map((d) => avg(d.h.slice(0, 6)))) - avg(before.map((d) => avg(d.h.slice(0, 6))))) * 1000),
   };
 }
 
 // ---------- the catalog: explanation → what it predicts → verdict ----------
 const V = (ok, no, why) => ({ verdict: ok ? 'supported' : no ? 'ruled out' : 'not yet clear', why });
+/** Four-way verdict: the readings support it, can't tell, don't support it (no sign of it, but not excluded), or rule it out. */
+const V4 = (verdict, why) => ({ verdict, why });
 const tempKnown = (t) => t.colder_more_r != null;
 const coldDriven = (t) => tempKnown(t) && t.colder_more_r >= 0.5 && (t.cold_effect_pct ?? 0) >= 30;
 const notCold = (t) => tempKnown(t) && (t.colder_more_r < 0.2 || (t.cold_effect_pct ?? 0) < 15);
@@ -914,17 +943,37 @@ export const CATALOG = {
   ],
   change: (t) => {
     const dT = (t.recent_temp_f ?? 0) - (t.before_temp_f ?? 0), win = t.change_watts_by_time_of_day[t.largest_change];
-    const colder = dT <= -3 && t.recent_temp_f < 62, hotter = dT >= 3 && t.recent_temp_f > 70, sustained = t.sustained_rise_watts >= 150 || t.daytime_floor_rise_watts >= 150;
+    const colder = dT <= -3, hotter = dT >= 3, sustained = t.sustained_rise_watts >= 150 || t.daytime_floor_rise_watts >= 150;
     const daytime = ['midday (12–17)', 'morning (6–12)'].includes(t.largest_change);
+    const sameTemp = t.same_temp_change_pct, tracksHeat = (t.hotter_more_r_after ?? 0) >= 0.4, tracksNothing = t.hotter_more_r_after != null && Math.abs(t.hotter_more_r_after) < 0.3;
+    const beyondSummer = t.hot_days_window_watts != null && t.window_watts_after > t.hot_days_window_watts;
+    const sameTempTxt = sameTemp != null ? `At the same outdoor temperatures (${t.same_temp_days} days), ${t.window} now averages ${t.same_temp_watts_after} W vs ${t.same_temp_watts_before} W before (${sameTemp >= 0 ? '+' : ''}${sameTemp}%).` : 'Too few days with matching temperatures to compare.';
+    const relTxt = t.hotter_more_r_after != null ? ` Before, ${t.window} use rose with temperature (r = ${t.hotter_more_r_before ?? 'n/a'}); since, r = ${t.hotter_more_r_after}.` : '';
     return [
-      { id: 'heating', title: colder || !hotter ? 'Heating running more (season change or settings)' : 'Cooling running more', ...V((colder || hotter) && (sustained || coldDriven(t)), Math.abs(dT) < 1.5 && !sustained && !coldDriven(t), `Outside ${t.recent_temp_f}°F vs ${t.before_temp_f}°F before; the quietest hour of the ${t.largest_change} window rose ${t.sustained_rise_watts} W and the daytime floor ${t.daytime_floor_rise_watts} W — ${sustained ? 'a steady extra draw, the way heating or cooling cycles' : 'not a steady extra draw'}.`),
-        action: colder || !hotter ? 'Check the temperature the thermostat holds while you’re home: if it’s above your comfortable minimum, try 1–2°F lower. Make sure it isn’t on HOLD, and don’t run a plug-in heater alongside central heat.' : 'Check the cooling setting while you’re home; 1–2°F warmer and closed blinds on sunny windows cut cooling time.', check: 'Is warm air coming from the vents through the afternoon? Is a space heater on?', thermostat: true },
-      { id: 'home', title: 'More time at home than usual', ...V(false, !daytime || win < 100, daytime ? 'A daytime increase fits more time at home — but just as well heating or appliances, so the readings alone can’t confirm it.' : `The change is mostly ${t.largest_change}, not daytime.`),
-        action: 'If people are home more, the extra is mostly normal use; heat or cool only the rooms in use.', check: 'Has anyone been home more than usual?', thermostat: false },
-      { id: 'bursts', title: 'Short bursts of appliance use (cooking, laundry, a kettle or hair dryer)', ...V(t.peak_rise_watts >= 2 * Math.max(1, t.sustained_rise_watts) && t.sustained_rise_watts < 100, t.sustained_rise_watts >= 0.6 * Math.max(1, win), `Peak hour rose ${t.peak_rise_watts} W vs ${t.sustained_rise_watts} W for the quietest hour of that window — ${t.sustained_rise_watts >= 0.6 * Math.max(1, win) ? 'the whole level moved up, not just the peaks' : 'mostly the peaks'}.`),
+      { id: 'daytime_load', title: 'Something running for hours during the day (an appliance or equipment)', ...V4(t.sustained_rise_watts >= 300 && t.night_change_watts < 150 && (tracksNothing || !tracksHeat || (sameTemp ?? 0) >= 30) ? 'supported' : t.sustained_rise_watts < 100 ? 'not supported' : 'not yet clear',
+        `${t.window} rose from ${t.window_watts_before} W to ${t.window_watts_after} W; its quietest hour rose ${t.sustained_rise_watts} W while nights changed ${t.night_change_watts} W — a load that runs for hours in the day, not around the clock.${relTxt}`),
+        action: `Find what draws about ${t.sustained_rise_watts} W for hours ${t.window}: switch suspects off for a few afternoons, then import a newer file.`, check: 'Walk through the apartment mid-afternoon: what is on that wasn’t in September — a space heater, dehumidifier, portable AC, computer or console?', thermostat: false },
+      { id: 'space_heater', title: 'A plug-in space heater (unconfirmed)', ...V4(colder && sustained && t.night_change_watts < 150 && !tracksHeat ? 'not yet clear' : !colder && tracksHeat ? 'not supported' : 'not yet clear',
+        `It got ${Math.abs(dT).toFixed(0)}°F ${colder ? 'cooler' : 'warmer'} and a steady daytime load appeared — what a heater used in the afternoons would look like. The meter can’t confirm a heater.`),
+        action: 'If a space heater is running while the building cools, use it less or ask management about the cold; 1,000–1,500 W adds up quickly.', check: 'Is anyone using a plug-in heater during the day?', thermostat: false },
+      { id: 'cooling_setting', title: 'Cooling set colder, on HOLD, or running abnormally', ...V4(sameTemp != null && sameTemp >= 30 ? 'not yet clear' : sameTemp != null && sameTemp < 10 ? 'not supported' : 'not yet clear',
+        `${sameTempTxt} That fits a colder setting, a HOLD or an AC fault — but a new appliance would look the same in hourly readings.`),
+        action: 'Check the cooling setpoint and clear any HOLD; with cooler, drier weather the AC should be running less, not more.', check: 'Is the AC running more than usual in the afternoons? Is the thermostat on HOLD?', thermostat: true },
+      { id: 'cooling_weather', title: 'Cooling working harder because of the weather', ...V4(tracksHeat && !colder ? 'supported' : (colder && (sameTemp ?? 0) >= 30) || (beyondSummer && colder) ? 'not supported' : 'not yet clear',
+        `Outside ${t.recent_temp_f}°F vs ${t.before_temp_f}°F before. ${sameTempTxt}${beyondSummer ? ` ${t.window} now uses more than on your summer days of 75°F+ (${t.hot_days_window_watts} W).` : ''}`),
+        action: 'Nothing unusual to fix if it is the weather; blinds on sunny windows help.', check: 'Has it been unusually hot or humid indoors?', thermostat: true },
+      { id: 'fan_on', title: 'Thermostat fan switched from AUTO to ON', ...V4(t.night_change_watts >= 150 && t.daytime_floor_rise_watts >= 150 ? 'supported' : t.night_change_watts < 100 && win >= 300 ? 'not supported' : 'not yet clear',
+        `A fan left ON runs day and night; nights changed ${t.night_change_watts} W while ${t.window} rose ${win} W.`),
+        action: 'Set the fan to AUTO unless the building requires ON.', check: 'Look at the fan setting on the thermostat: AUTO or ON?', thermostat: true },
+      { id: 'heating', title: 'Central heating running more', ...V((colder) && (sustained || coldDriven(t)), Math.abs(dT) < 1.5 && !sustained && !coldDriven(t), `Outside ${t.recent_temp_f}°F vs ${t.before_temp_f}°F before; the quietest hour of the ${t.largest_change} window rose ${t.sustained_rise_watts} W.`),
+        action: 'Check the temperature the thermostat holds while you’re home; 1–2°F lower if comfortable, and no HOLD.', check: 'Is warm air coming from the vents?', thermostat: true },
+      { id: 'home', title: 'More time at home than usual', ...V(false, !daytime || win < 100, daytime ? 'A daytime increase fits more time at home — but just as well appliances or the AC, so the readings alone can’t confirm it.' : `The change is mostly ${t.largest_change}, not daytime.`),
+        action: 'If people are home more, the extra is mostly normal use; cool or heat only the rooms in use.', check: 'Has anyone been home more than usual?', thermostat: false },
+      { id: 'bursts', title: 'Short bursts of appliance use (cooking, laundry, a kettle or hair dryer)', ...V(t.peak_rise_watts >= 2 * Math.max(1, t.sustained_rise_watts) && t.sustained_rise_watts < 100, t.sustained_rise_watts >= 0.6 * Math.max(1, win), `Peak hour rose ${t.peak_rise_watts} W vs ${t.sustained_rise_watts} W for the quietest hour — ${t.sustained_rise_watts >= 0.6 * Math.max(1, win) ? 'the whole level moved up, not just the peaks' : t.sustained_rise_watts >= 300 ? 'both rose: a steady extra load plus higher peaks' : 'mostly the peaks'}. Hourly readings can’t show cycling within an hour.`),
         action: 'Full loads, cold-water washing, air-drying and lids on pots cut appliance bursts.', check: 'Have you been cooking or doing laundry more than usual?', thermostat: false },
-      { id: 'device', title: 'Something new runs all the time', ...V(t.floor_change_watts >= 100 && !(dT <= -3), t.floor_change_watts < 40, `Quietest-hour floor changed by ${t.floor_change_watts} W${t.floor_change_watts >= 100 && dT <= -3 ? ' — but it also got colder, which can raise the floor' : ''}.`),
-        action: `Look for something new that stays on — a dehumidifier, aquarium or second fridge; about ${t.floor_change_watts} W extra around the clock.`, check: 'What was plugged in around the start of the rise?', thermostat: false },
+      { id: 'device', title: 'Something new running around the clock', ...V4(t.floor_change_watts >= 100 && !(dT <= -3) ? 'supported' : t.floor_change_watts < 40 && t.night_change_watts < 100 ? 'not supported' : 'not yet clear',
+        `The overnight floor changed ${t.floor_change_watts} W — an around-the-clock load would show there.${t.floor_change_watts < 40 ? ' A device used only during the day is still possible (see above).' : ''}`),
+        action: `Look for something new that stays on — a dehumidifier, aquarium or second fridge.`, check: 'What was plugged in around the start of the rise?', thermostat: false },
       { id: 'oneoff', title: 'One unusual day skews the average', ...V((t.biggest_day_share_pct ?? 0) >= 50, (t.biggest_day_share_pct ?? 100) < 30 && t.days_above_usual >= Math.ceil(t.recent_days / 2), `Biggest day ${t.biggest_day?.date} (+${t.biggest_day?.extra_kwh} kWh) is ${t.biggest_day_share_pct}% of the extra; ${t.days_above_usual} of ${t.recent_days} days were above usual.`),
         action: `If ${t.biggest_day?.date} was a special day (guests, cooking, laundry), there is nothing to fix.`, check: `What happened on ${t.biggest_day?.date}?`, thermostat: false },
     ];
@@ -957,7 +1006,9 @@ export function explainFinding(ctx, priority) {
   else if (priority === 'thermostat') tests = awayTests(ctx);
   else if (priority === 'change') tests = riseTests(ctx);
   if (!tests?.available || !CATALOG[kind]) return { kind, tests, hypotheses: [] };
-  return { kind, tests, hypotheses: CATALOG[kind](tests) };
+  // Direct measurements: the overnight floor, one day's share, peaks vs. steady level. Everything else is inferred from a resemblance.
+  const DIRECT = ['device', 'oneoff', 'bursts', 'new', 'devices'];
+  return { kind, tests, hypotheses: CATALOG[kind](tests).map((h) => ({ ...h, inferred: !DIRECT.includes(h.id) })) };
 }
 
 // ---------- what deserves attention first ----------
@@ -990,7 +1041,11 @@ function risingNow(inp) {
   const r = inp.report;
   if (r.change?.diff > 0) return r.change.diff;
   const sw = similarWeather(inp.state.usage, inp.temps || {});
-  return sw.status === 'ok' && sw.meaningful && sw.direction === 'higher' ? sw.actualAvg - sw.expectedAvg : 0;
+  if (sw.status === 'ok' && sw.meaningful && sw.direction === 'higher') return sw.actualAvg - sw.expectedAvg;
+  // A clear jump in raw daily totals counts too: when the weather changed at the same time, a weather model can absorb a real
+  // change (confounding). Whether the weather explains it is then tested by the explanations, not assumed.
+  const t = (r.hd?.length || 0) >= 24 ? riseTests({ state: inp.state, temps: inp.temps || {}, hd: r.hd, report: r }) : null;
+  return t?.available && t.start_detected && t.recent_kwh_per_day >= 1.15 * t.before_kwh_per_day ? t.recent_kwh_per_day - t.before_kwh_per_day : 0;
 }
 const avgHdd = (inp) => { const t = Object.values(inp.temps || {}).filter(Number.isFinite); return t.length ? t.reduce((s, x) => s + Math.max(0, 65 - x), 0) / t.length : 0; };
 
@@ -1041,29 +1096,50 @@ export const QUESTIONS = {
     text: (v) => `Has anyone been home more than usual since about ${md(v.since)}?`,
     why: 'A daytime increase can come from people being home more — or from heating or appliances. Your answer separates them.',
     options: [['lots', 'Yes, considerably more'], ['little', 'A little more'], ['no', 'No, our routine hasn’t changed'], ['unknown', 'I’m not sure']],
-    effect: { home: { lots: 2, little: 1, no: -2 }, occupied: { lots: 2, little: 1, no: -2 } },
+    effect: { home: { lots: 2, little: 1, no: -3 }, occupied: { lots: 2, little: 1, no: -3 } },
   },
   heat_on: {
     kinds: ['change', 'overnight', 'evening', 'standby', 'thermostat'], scope: 'home',
     text: () => 'Has your building switched from cooling to heating?',
     why: 'If the heat came on recently, colder days explain part of the change, and the heating schedule becomes the lever.',
     options: [['yes', 'Yes, the heat is on'], ['no', 'No, not yet'], ['unknown', 'I’m not sure']],
-    effect: { heating: { yes: 1, no: -2 } },
+    effect: { heating: { yes: 1, no: -3 }, cooling_weather: { yes: -3 }, cooling_setting: { yes: -3 }, space_heater: { no: 1 } },
     known: (s) => (s.profile.setupDone && s.profile.buildingMode === 'heat_available' ? 'yes' : s.profile.setupDone && s.profile.buildingMode === 'cool_available' ? 'no' : null),
   },
   new_appliance: {
     kinds: ['change', 'standby', 'overnight'],
-    text: (v) => `Did you start using a space heater, dehumidifier or another plug-in appliance around ${md(v.since)}?`,
-    why: 'Something new that stays on raises use at every hour, including overnight; the readings can show that pattern but not which device it is.',
+    text: (v) => `Around ${md(v.since)}, did you start running something that stays on day and night — a dehumidifier, aquarium, second fridge or freezer?`,
+    why: 'Something that stays on raises use at every hour, including overnight; the readings can show that pattern but not which device it is.',
     options: [['yes', 'Yes'], ['no', 'No'], ['unknown', 'I’m not sure']],
     effect: { device: { yes: 2, no: -1 }, new: { yes: 2, no: -1 }, devices: { yes: 1 } },
+  },
+  daytime_device: {
+    kinds: ['change'],
+    text: (v) => `Since about ${md(v.since)}, has anything new been running for hours during the day — a space heater, dehumidifier, portable AC, or computer or gaming equipment?`,
+    why: 'The readings show a load of several hundred watts running for hours each afternoon. Only you can see what it is.',
+    options: [['heater', 'Yes — a space heater'], ['other', 'Yes — something else'], ['no', 'No, nothing new'], ['unknown', 'I’m not sure']],
+    effect: { daytime_load: { heater: 2, other: 3, no: -2 }, space_heater: { heater: 3, other: -1, no: -3 } },
+  },
+  cooling_longer: {
+    kinds: ['change'],
+    text: (v) => `Have you noticed the AC running more than usual in the afternoons since about ${md(v.since)}?`,
+    why: 'Use at the same outdoor temperature nearly doubled. If the AC is running more, the setting or the equipment is the lead; if not, look for an appliance.',
+    options: [['yes', 'Yes, more than usual'], ['no', 'No, about the same'], ['unknown', 'I haven’t noticed']],
+    effect: { cooling_setting: { yes: 2, no: -2 }, daytime_load: { yes: -1, no: 1 } },
+  },
+  fan_mode: {
+    kinds: ['change'], scope: 'home',
+    text: () => 'Is the thermostat’s fan set to AUTO or ON?',
+    why: 'A fan left ON runs all day and night. Your nights barely changed, so this is a quick way to rule it in or out.',
+    options: [['auto', 'AUTO'], ['on', 'ON'], ['unknown', 'I’m not sure']],
+    effect: { fan_on: { on: 3, auto: -3 } },
   },
   space_heater: {
     kinds: ['change'],
     text: (v) => `Have you been running a plug-in space heater since about ${md(v.since)}?`,
-    why: 'A space heater draws 1,000–1,500 W while on — a steady extra load that looks like heating in the readings.',
+    why: 'A space heater draws 1,000–1,500 W while on — a steady daytime load in the readings.',
     options: [['yes', 'Yes'], ['no', 'No'], ['unknown', 'I’m not sure']],
-    effect: { heating: { yes: 2 } },
+    effect: { space_heater: { yes: 3, no: -3 }, daytime_load: { yes: 1 } },
   },
   more_appliances: {
     kinds: ['change'],
@@ -1089,9 +1165,9 @@ export const QUESTIONS = {
   thermostat_changed: {
     kinds: ['change', 'thermostat', 'overnight', 'standby'],
     text: () => 'Did anyone change the thermostat settings or leave it on HOLD recently?',
-    why: 'A warmer setting or a HOLD raises heating use without anyone noticing.',
-    options: [['warmer', 'Yes, warmer or on HOLD'], ['cooler', 'Yes, cooler'], ['no', 'No'], ['unknown', 'Not sure']],
-    effect: { heating: { warmer: 1, cooler: -1 } },
+    why: 'A colder cooling setting or a HOLD makes the AC run longer without anyone noticing.',
+    options: [['colder', 'Yes — set colder, or on HOLD'], ['warmer', 'Yes — set warmer'], ['no', 'No'], ['unknown', 'Not sure']],
+    effect: { cooling_setting: { colder: 2, warmer: -1, no: -1 }, heating: { warmer: 1 } },
   },
   hvac_meter: {
     kinds: ['*'], scope: 'home', setting: 'hvacMetered',
@@ -1115,16 +1191,28 @@ export function answerFor(state, q, key) {
 }
 
 const STATUS = {
-  likely: 'Likely', fits: 'Fits the readings', possible: 'Possible', open: 'Not yet clear', unlikely: 'Unlikely', out: 'Ruled out by the readings', conflict: 'Your answer and the readings disagree',
+  likely: 'Likely', fits: 'Fits the readings', possible: 'Possible', open: 'Not yet clear', less: 'Less likely',
+  notsup: 'Not supported by the readings', out: 'Ruled out by the readings', outByYou: 'Ruled out by what you told us', conflict: 'Your answer and the readings disagree',
 };
-/** Combine the readings' verdict with the user's answers. Answers shift likelihood; they never turn a measured "ruled out" into "likely". */
+/**
+ * Combine the readings' verdict with the household's answers. Answers are reports, not measurements: they shift likelihood,
+ * and a confirmed fact (score ≤ −3) rules an explanation out unless the readings directly contradict it (then: conflict).
+ * Readings: supported +2, not yet clear 0, not supported −1, ruled out −2.
+ */
 function statusOf(h, score) {
-  const t = h.verdict === 'supported' ? 2 : h.verdict === 'ruled out' ? -2 : 0;
-  if (t === -2 && score > 0) return 'conflict';
-  if (t === 2 && score < 0) return 'conflict';
+  const t = { supported: 2, 'not yet clear': 0, 'not supported': -1, 'ruled out': -2 }[h.verdict] ?? 0;
+  // A confirmed household fact overrides an explanation judged by resemblance; only direct measurements can "disagree" with you.
+  if (score <= -3) return t === 2 && !h.inferred ? 'conflict' : 'outByYou';
+  if (!h.inferred && t < 0 && score > 0) return 'conflict'; // you report something a direct measurement doesn't show
+  if ((t === -2 && score > 0) || (t === 2 && score < 0)) return h.inferred ? (score < 0 ? 'less' : 'possible') : 'conflict';
   if (t === -2) return 'out';
+  if (t === -1 && score <= 0) return 'notsup';
   const total = t + score;
-  return total >= 3 || (t === 0 && score >= 2) ? 'likely' : t === 2 && score === 0 ? 'fits' : total >= 1 ? 'possible' : total <= -1 ? 'unlikely' : 'open';
+  if (total >= 3 || (t >= -1 && score >= 2)) return 'likely';
+  if (t === 2 && score === 0) return 'fits';
+  if (total >= 1) return 'possible';
+  if (total <= -1) return 'less';
+  return 'open';
 }
 
 /** The investigation the app leads with, or null when nothing needs investigating. */
@@ -1149,7 +1237,7 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
     headline = `Your electricity use rose about ${fmt(pct)}% since ${md(t.from)}, mostly ${attribution[0].window}.`;
     known.push(`Last ${t.recent_days} days: ${fmt(t.recent_kwh_per_day, 1)} kWh a day, vs ${fmt(t.before_kwh_per_day, 1)} in the 4 weeks before.`);
     known.push(`${cap(attribution[0].window)} account for ${attribution[0].share}% of the increase (about ${fmt(attribution[0].kwh, 1)} kWh a day).`);
-    known.push(`Outside it averaged ${fmt(t.recent_temp_f)}°F, vs ${fmt(t.before_temp_f)}°F before. ${t.days_above_usual} of ${t.recent_days} days were above your usual.`);
+    known.push(`${t.recent_temp_f != null && t.before_temp_f != null ? `Outside it averaged ${fmt(t.recent_temp_f)}°F, vs ${fmt(t.before_temp_f)}°F before. ` : 'No outdoor temperatures for this period yet, so weather can’t be checked. '}${t.days_above_usual} of ${t.recent_days} days were above your usual.`);
   } else if (pr.priority === 'overnight' || pr.priority === 'evening') {
     headline = `${t.day} ${t.part === 'evening' ? 'evenings' : 'nights'} use about ${fmt(t.avg_extra_kwh, 1)} kWh more than other days — ${t.weeks_with_excess} of ${t.occurrences} weeks.`;
     known.push(`The extra usually runs ${t.usual_start}–${t.usual_end}, about ${fmt(t.avg_extra_watts)} W on average.`);
@@ -1168,7 +1256,7 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
   const hyps = ex.hypotheses.map((h) => {
     let score = 0;
     const answers = [], forE = [], againstE = [];
-    (h.verdict === 'supported' ? forE : h.verdict === 'ruled out' ? againstE : forE).push(`Readings: ${h.why}`);
+    (h.verdict === 'supported' || h.verdict === 'not yet clear' ? forE : againstE).push(`Readings: ${h.why}`);
     for (const [qid, q] of qs) {
       const eff = q.effect[h.id];
       const a = eff && answerFor(state, qid, key);
@@ -1182,22 +1270,26 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
       answers.push({ q: qid, value: a.value });
     }
     const status = statusOf(h, score);
-    return { ...h, score, status, label: STATUS[status], for: forE, against: againstE, answers };
+    const missing = qs.filter(([qid, q]) => q.effect[h.id] && !answerFor(state, qid, key)).map(([, q]) => q.text(v));
+    return { ...h, score, status, label: STATUS[status], for: forE, against: againstE, answers, missing, verify: h.check };
   });
 
   // Next question: the unanswered one most able to change a conclusion.
-  const weight = { fits: 3, possible: 2, open: 2, conflict: 2, likely: 1, unlikely: 1, out: 0 }; // confirming the leading explanation first
+  const weight = { fits: 3, possible: 2, open: 2, conflict: 2, likely: 1, less: 0.5, notsup: 0, out: 0, outByYou: 0 }; // questions that can move a live explanation
   let question = null, best = 0;
+  const lead0 = [...hyps].sort((a, b) => (weight[b.status] ?? 0) - (weight[a.status] ?? 0))[0];
   for (const [qid, q] of qs) {
     if (answerFor(state, qid, key)) continue;
-    let w = Object.keys(q.effect).reduce((sum0, hid) => sum0 + (weight[hyps.find((x) => x.id === hid)?.status] ?? 0), 0);
+    // Can it confirm or rule out the leading explanation? Then how many other live explanations does it touch?
+    const ws = Object.keys(q.effect).map((hid) => weight[hyps.find((x) => x.id === hid)?.status] ?? 0).sort((a, b) => b - a);
+    let w = (ws[0] ?? 0) + 0.5 * ws.slice(1).reduce((a, x) => a + x, 0) + (lead0 && q.effect[lead0.id] && (weight[lead0.status] ?? 0) > 0 ? 1 : 0);
     if (qid === 'hvac_meter' && hyps.some((x) => x.thermostat && x.status !== 'out')) w = 1.5;
     if (w > best) { best = w; question = { id: qid, text: q.text(v), why: q.why, options: q.options }; }
   }
 
   // Recommendation from the leading explanation; thermostat advice only if HVAC is on this meter.
-  const order = { likely: 0, fits: 1, possible: 2, conflict: 3, open: 4, unlikely: 5, out: 6 };
-  const ranked = [...hyps].filter((h) => h.status !== 'out' && h.status !== 'unlikely').sort((a, b) => order[a.status] - order[b.status] || b.score - a.score);
+  const order = { likely: 0, fits: 1, possible: 2, conflict: 3, open: 4, less: 5, notsup: 6, out: 7, outByYou: 8 };
+  const ranked = [...hyps].filter((h) => !['out', 'outByYou', 'notsup', 'less'].includes(h.status)).sort((a, b) => order[a.status] - order[b.status] || b.score - a.score);
   const metered = state.profile.hvacMetered;
   const lead = ranked.find((h) => !(h.thermostat && metered === 'no')) || null;
   const recommendation = lead ? recommend(pr.priority, lead, t, r, state, metered, o, ranked) : null;
@@ -1210,10 +1302,19 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
   return { key, kind: pr.priority, title: PRIORITIES[pr.priority], headline, known, attribution, tests: t, hypotheses: hyps, question, answered, conclusion, recommendation, since: v.since };
 }
 
+/** $/kWh: the confirmed rate, else the average implied by the cost column of the imported Delmarva file (last 60 days). */
+export function rateFor(state) {
+  const confirmed = C.energyCost(1, state.profile.tariff);
+  if (confirmed != null) return { rate: confirmed, source: 'your confirmed rate' };
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete && d.cost != null).slice(-60);
+  const kwh = sum(days.map((d) => d.kwh)), cost = sum(days.map((d) => d.cost));
+  return days.length >= 14 && kwh > 0 && cost / kwh > 0.03 && cost / kwh < 1 ? { rate: cost / kwh, source: 'the costs in your Delmarva file' } : { rate: null, source: null };
+}
+
 function recommend(kind, h, t, r, state, metered, ops, ranked = []) {
-  const rate = C.energyCost(1, state.profile.tariff), money = (k) => (rate != null ? ` (≈ $${fmt(k * rate, 2)})` : '');
+  const rf = rateFor(state), rate = rf.rate, money = (k) => (rate != null ? ` (≈ $${fmt(k * rate, 2)} at ${rf.source})` : '');
   const out = { hypothesis: h.id, title: h.action, problem: '', expected: '', verify: '', hours: null, note: '' };
-  const thermoNote = h.thermostat && metered !== 'yes' ? (metered === 'unknown' ? ' Whether this lowers your bill depends on heating and cooling being on your meter (not confirmed yet).' : metered === 'partial' ? ' Only the fan is on your meter, so most of the heating saving goes to the building.' : '') : '';
+  const thermoNote = h.thermostat && metered !== 'yes' ? (metered === 'unknown' ? ' Whether this lowers your bill depends on heating and cooling being on your meter (not confirmed yet).' : metered === 'partial' ? ' Only the fan is on your meter, so most of the heating or cooling saving goes to the building.' : '') : '';
   if (kind === 'change') {
     const top = Object.entries(t.change_kwh_per_day_by_time_of_day).sort((a, b) => b[1] - a[1])[0];
     const extraDay = t.recent_kwh_per_day - t.before_kwh_per_day;
@@ -1228,6 +1329,37 @@ function recommend(kind, h, t, r, state, metered, ops, ranked = []) {
       out.verify = 'Answer the question above, or check during those hours; the explanation list updates as soon as you do.';
       return out;
     }
+    const [wa, wb] = WINDOWS[t.largest_change], winH = wb - wa;
+    const loadKwh = (Math.max(0, (t.window_watts_after ?? 0) - (t.window_watts_before ?? 0)) * winH) / 1000;
+    if (h.id === 'daytime_load' || h.id === 'space_heater') {
+      out.title = h.id === 'space_heater' && h.status === 'likely' ? 'Use the space heater less — or ask the building about the cold' : `Find what runs for hours in the ${WIN_LABEL[t.largest_change]} (about ${wRange(t.sustained_rise_watts, (t.window_watts_after ?? 0) - (t.window_watts_before ?? 0))} W)`;
+      out.expected = `That window now uses about ${fmt(loadKwh, 1)} kWh a day more than before — about ${fmt(loadKwh * 30)} kWh a month${money(loadKwh * 30)} if it continues. Switching the cause off would remove most of it; how much depends on what it is.`;
+      out.detail = h.id === 'space_heater' && h.status === 'likely' ? 'A heater running while the building is still cooling is fighting the AC. Dress warmer, heat only the room you’re in for shorter times, or ask management to adjust the cooling.' : `Mid-afternoon, look for anything new that runs for hours: a space heater, dehumidifier, portable AC, aquarium heater, computer or gaming equipment. Switch suspects off for a few afternoons, then import a newer file — the ${t.window} level should drop by about ${fmt(t.sustained_rise_watts)} W if you found it.`;
+      out.hours = WINDOWS[t.largest_change];
+      out.verify = `Mark it started below. After 7+ days of new readings, the app compares ${WIN_LABEL[t.largest_change]} with the 4 weeks before.`;
+      out.note = thermoNote;
+      return out;
+    }
+    if (h.id === 'cooling_setting') {
+      const extra = (Math.max(0, (t.same_temp_watts_after ?? 0) - (t.same_temp_watts_before ?? 0)) * winH) / 1000;
+      out.title = 'Put the cooling back to your usual setting and clear any HOLD';
+      out.expected = `At the same outdoor temperatures ${WIN_LABEL[t.largest_change]} use about ${fmt(extra, 1)} kWh a day more than before — about ${fmt(extra * 30)} kWh a month${money(extra * 30)} if it’s the AC. With cooler, drier weather the AC should be running less.`;
+      out.detail = 'Check the cooling setpoint (warmer is cheaper; 76–78°F is typical), make sure it isn’t on HOLD and the fan is on AUTO. If the AC runs constantly at a normal setting, report it to building maintenance — that can be a fault.';
+      out.hours = WINDOWS[t.largest_change];
+      out.verify = `After 7+ days of new readings, the app compares ${WIN_LABEL[t.largest_change]} with before.`;
+      out.note = thermoNote;
+      return out;
+    }
+    if (h.id === 'fan_on') {
+      const kwh = (Math.max(0, t.night_change_watts) * 24) / 1000;
+      out.title = 'Set the thermostat fan to AUTO';
+      out.expected = `A continuously running fan adds roughly ${fmt(t.night_change_watts)} W around the clock here — about ${fmt(kwh * 30)} kWh a month${money(kwh * 30)}.`;
+      out.verify = 'After a week of new readings, the app compares overnight use with before.';
+      out.hours = [0, 6];
+      out.note = thermoNote;
+      return out;
+    }
+    if (h.id === 'cooling_weather') { out.title = 'Nothing unusual — it’s the weather'; out.expected = 'Cooling follows the weather; nothing changed in how your home uses it.'; out.verify = 'Watch whether use falls as the weather cools.'; return out; }
     if (h.id === 'oneoff') { out.title = 'No change needed for one unusual day'; out.expected = 'One busy day doesn’t mean a lasting change.'; out.verify = 'Import a newer file in a week: if daily use is back near the old level, it was a one-off.'; return out; }
     if (h.id === 'home' && h.status === 'conflict') {
       out.title = `Find out what runs ${WIN_LABEL[top[0]]}`;
@@ -1308,4 +1440,169 @@ export function zonePlans(state, now = Date.now()) {
     const profile = { ...state.profile, hvacType: z.hvacType, buildingMode: z.availability, hvacMetered: z.metered, comfort: { ...state.profile.comfort, heat: { ...z.heat }, cool: { ...z.cool } } };
     return { zone: z, rec: C.recommend({ ...state, profile }, [], now) };
   });
+}
+
+// ================= Backups: merge safely between devices =================
+// Restoring never silently replaces data. A backup is validated, compared with this device, and merged: new records are
+// added, identical ones kept once, and anything that differs is listed as a conflict for you to choose (default: keep this
+// device's value). A copy of this device's data is saved first, the result is read back to verify, and the merge can be undone.
+
+const sameNum = (a, b) => Math.abs(a - b) < 1e-9;
+const SETTING_AREAS = { buildingMode: 'Building season', comfort: 'Comfort temperatures', routine: 'Routine', tariff: 'Electricity rate', hvacType: 'Equipment', hvacMetered: 'Heating/cooling on your meter', recoveryMin: 'Warm-up time', changeDate: 'Savings start date' };
+
+/** Read a backup file's text: an Energy backup (version 1 or 2) or a household update. Throws with a plain reason. */
+export function parseBackup(text) {
+  let raw;
+  try { raw = JSON.parse(text); } catch { throw new Error('This file isn’t valid JSON.'); }
+  if (raw?.kind === 'aeo-household-update') return { kind: 'household', update: validateHousehold(raw) };
+  if (!raw || typeof raw !== 'object' || !raw.profile || ![1, 2].includes(raw.version)) throw new Error('This isn’t an Energy app backup.');
+  const state = migrate(raw);
+  return { kind: 'backup', state, meta: { exportedAt: typeof raw.meta?.exportedAt === 'string' ? raw.meta.exportedAt.slice(0, 30) : null, device: typeof raw.meta?.device === 'string' ? raw.meta.device.slice(0, 20) : null }, aiReports: Array.isArray(raw.aiReports) ? raw.aiReports.slice(-10) : [] };
+}
+
+/** What a merge would do. Nothing is changed. */
+export function planMerge(local, incoming) {
+  const plan = { add: {}, same: {}, conflicts: [] };
+  const inc = (k, n = 1) => { plan.add[k] = (plan.add[k] || 0) + n; }, same = (k) => { plan.same[k] = (plan.same[k] || 0) + 1; };
+  let readingConflicts = 0;
+  const sample = [];
+  for (const part of ['hourly', 'daily', 'cost']) {
+    for (const [k, v] of Object.entries(incoming.usage[part] || {})) {
+      const lv = local.usage[part]?.[k];
+      if (lv == null) inc(part === 'cost' ? 'costs' : 'readings');
+      else if (sameNum(lv, v)) same('readings');
+      else { readingConflicts++; if (sample.length < 3) sample.push(`${k}: ${lv} here vs ${v} in the backup`); }
+    }
+  }
+  if (readingConflicts) plan.conflicts.push({ id: 'readings', label: `${readingConflicts} electricity reading${readingConflicts === 1 ? '' : 's'} differ`, detail: sample.join('; '), local: 'Keep this device’s readings', incoming: 'Use the backup’s readings' });
+  const ansKey = (a) => [a.q, a.key, a.value, a.at, a.since].join('|');
+  const la = new Set((local.answers || []).map(ansKey));
+  for (const a of incoming.answers || []) la.has(ansKey(a)) ? same('answers') : inc('answers');
+  const actById = new Map((local.actions || []).map((a) => [a.id, a]));
+  for (const a of incoming.actions || []) {
+    const l = actById.get(a.id);
+    if (!l) inc('actions'); else if (JSON.stringify(l) === JSON.stringify(a)) same('actions');
+    else plan.conflicts.push({ id: `action:${a.id}`, label: `“${a.title}”`, detail: `here: ${ACTION_STATUS[l.status]}${l.start ? ` since ${l.start}` : ''}; backup: ${ACTION_STATUS[a.status]}${a.start ? ` since ${a.start}` : ''}`, local: 'Keep this device’s', incoming: 'Use the backup’s' });
+  }
+  const hk = (h) => `${h.date}|${h.fingerprint}`, lh = new Set((local.programmedHistory || []).map(hk));
+  for (const h of incoming.programmedHistory || []) lh.has(hk(h)) ? same('schedule history') : inc('schedule history');
+  const ok = (o) => `${o.ts}|${o.roomF}|${o.setF}`, lo = new Set((local.observations || []).map(ok));
+  for (const o of incoming.observations || []) lo.has(ok(o)) ? same('thermostat notes') : inc('thermostat notes');
+  for (const d of Object.keys(incoming.temps || {})) if (!(d in (local.temps || {}))) inc('weather days');
+  const zById = new Map((local.zones || []).map((z) => [z.id, z]));
+  for (const z of incoming.zones || []) {
+    const l = zById.get(z.id);
+    if (!l) inc('zones'); else if (JSON.stringify(l) !== JSON.stringify(z)) plan.conflicts.push({ id: `zone:${z.id}`, label: `Next-apartment zone “${z.label}”`, detail: 'its settings differ', local: 'Keep this device’s', incoming: 'Use the backup’s' });
+  }
+  if (local.moveIn && incoming.moveIn && local.moveIn !== incoming.moveIn) plan.conflicts.push({ id: 'moveIn', label: 'Move-in date', detail: `${local.moveIn} here vs ${incoming.moveIn}`, local: local.moveIn, incoming: incoming.moveIn });
+  if (local.programmed && incoming.programmed && local.programmed.date === incoming.programmed.date && local.programmed.fingerprint !== incoming.programmed.fingerprint) plan.conflicts.push({ id: 'programmed', label: 'Which schedule is on the thermostat', detail: `both say programmed on ${local.programmed.date}, but with different schedules`, local: 'This device’s', incoming: 'The backup’s' });
+  // Settings: compared by area. A device that was never set up takes the backup's settings by default; otherwise this device's.
+  const fresh = !local.profile.setupDone && incoming.profile.setupDone;
+  for (const [k, label] of Object.entries(SETTING_AREAS)) {
+    if (JSON.stringify(local.profile[k]) === JSON.stringify(incoming.profile[k])) continue;
+    plan.conflicts.push({ id: `setting:${k}`, label, detail: `${showSetting(k, local.profile[k])} here vs ${showSetting(k, incoming.profile[k])} in the backup`, local: 'Keep this device’s', incoming: 'Use the backup’s', default: fresh ? 'incoming' : 'local' });
+  }
+  plan.empty = !Object.keys(plan.add).length && !plan.conflicts.length;
+  return plan;
+}
+function showSetting(k, v) {
+  if (k === 'routine') return v?.mode === 'days' ? 'day by day' : `weekdays ${v?.weekday?.wake}–${v?.weekday?.sleep}`;
+  if (k === 'comfort') return `heat ${v?.heat?.home}° / cool ${v?.cool?.home}°`;
+  if (k === 'tariff') return v?.confirmed ? `${v.centsPerKwh}¢` : 'not set';
+  if (k === 'buildingMode') return { heat_available: 'heating', cool_available: 'cooling', fan_only: 'fan only', unknown: 'not set' }[v] || 'not set';
+  if (k === 'hvacMetered') return { yes: 'yes', no: 'no — building pays', partial: 'partly', unknown: 'not sure' }[v] || 'not set';
+  if (k === 'recoveryMin') return v ? `${v} min` : 'not set';
+  if (v === '' || v == null) return 'not set';
+  return String(v).replace(/_/g, ' ');
+}
+
+/** The merged state. `choices` maps conflict ids to 'local' | 'incoming'; anything not chosen keeps the conflict's default (this device). */
+export function applyMerge(local, incoming, choices = {}, plan = planMerge(local, incoming)) {
+  const pick = (id) => choices[id] || plan.conflicts.find((c) => c.id === id)?.default || 'local';
+  const out = structuredClone(local);
+  for (const part of ['hourly', 'daily', 'cost']) {
+    for (const [k, v] of Object.entries(incoming.usage[part] || {})) {
+      if (out.usage[part][k] == null || (pick('readings') === 'incoming' && !sameNum(out.usage[part][k], v))) out.usage[part][k] = v;
+    }
+  }
+  for (const [d, t] of Object.entries(incoming.temps || {})) if (!(d in out.temps)) out.temps[d] = t;
+  const ansKey = (a) => [a.q, a.key, a.value, a.at, a.since].join('|'), seenA = new Set(out.answers.map(ansKey));
+  out.answers = [...out.answers, ...(incoming.answers || []).filter((a) => !seenA.has(ansKey(a)))].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)); // stable: correction order kept
+  const byId = new Map(out.actions.map((a) => [a.id, a]));
+  for (const a of incoming.actions || []) if (!byId.has(a.id) || pick(`action:${a.id}`) === 'incoming') byId.set(a.id, a);
+  out.actions = [...byId.values()];
+  const hk = (h) => `${h.date}|${h.fingerprint}`, seenH = new Set(out.programmedHistory.map(hk));
+  out.programmedHistory = [...out.programmedHistory, ...(incoming.programmedHistory || []).filter((h) => !seenH.has(hk(h)))].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (!out.programmed || (incoming.programmed && (incoming.programmed.date > out.programmed.date || (incoming.programmed.date === out.programmed.date && pick('programmed') === 'incoming')))) out.programmed = incoming.programmed || out.programmed;
+  const ok = (o) => `${o.ts}|${o.roomF}|${o.setF}`, seenO = new Set(out.observations.map(ok));
+  out.observations = [...out.observations, ...(incoming.observations || []).filter((o) => !seenO.has(ok(o)))].sort((a, b) => a.ts - b.ts).slice(-500);
+  const zById = new Map(out.zones.map((z) => [z.id, z]));
+  for (const z of incoming.zones || []) if (!zById.has(z.id) || pick(`zone:${z.id}`) === 'incoming') zById.set(z.id, z);
+  out.zones = [...zById.values()].slice(0, 4);
+  if (!out.moveIn || pick('moveIn') === 'incoming') out.moveIn = incoming.moveIn || out.moveIn;
+  for (const k of Object.keys(SETTING_AREAS)) if (pick(`setting:${k}`) === 'incoming') out.profile[k] = structuredClone(incoming.profile[k]);
+  out.profile.setupDone = !!(local.profile.setupDone || incoming.profile.setupDone); // finished on either device = finished
+  out.appliedUpdates = [...new Set([...(out.appliedUpdates || []), ...(incoming.appliedUpdates || [])])];
+  return migrate(out);
+}
+
+/**
+ * Write a new state as one transaction: save a copy of the current data, write, read back and compare. localStorage writes one key
+ * atomically, so an interruption leaves either the old data or the new — and the copy allows undo either way.
+ */
+export function commitState(storage, key, next, { snapshotKey = 'aeo.snapshot', reason = 'merge' } = {}) {
+  const before = storage.getItem(key);
+  storage.setItem(snapshotKey, JSON.stringify({ at: new Date().toISOString(), reason, state: before ? JSON.parse(before) : null }));
+  const text = JSON.stringify(next);
+  storage.setItem(key, text);
+  if (storage.getItem(key) !== text) throw new Error('The saved data didn’t read back the same.');
+  return true;
+}
+/** Put back the copy saved before the last merge, restore or household update (verified the same way). */
+export function undoLast(storage, key, { snapshotKey = 'aeo.snapshot' } = {}) {
+  const snap = JSON.parse(storage.getItem(snapshotKey) || 'null');
+  if (!snap?.state) throw new Error('There’s nothing to undo.');
+  const text = JSON.stringify(snap.state);
+  storage.setItem(key, text);
+  if (storage.getItem(key) !== text) throw new Error('The restored data didn’t read back the same.');
+  storage.removeItem?.(snapshotKey);
+  return snap;
+}
+
+// ================= Household updates: apply confirmed facts in one verified step =================
+// A household update carries facts you confirmed (routine, what the building provides, answers). It never changes comfort
+// temperatures, and applying it in the app does not reprogram the physical thermostat.
+
+function validateHousehold(raw) {
+  const days = raw.routine?.days;
+  if (raw.version !== 1 || typeof raw.id !== 'string' || !days || !C.DOW.every((d) => days[d] && typeof days[d].wake === 'string')) throw new Error('This household update is incomplete.');
+  for (const d of C.DOW) C.buildDay(days[d], { home: 70, away: 68, sleep: 68 }, 30); // throws with a plain reason for an impossible routine
+  if (raw.buildingMode && !(raw.buildingMode in C.BUILDING_MODES)) throw new Error('Unknown building season in the update.');
+  const answers = (Array.isArray(raw.answers) ? raw.answers : []).filter((a) => QUESTIONS[a.q] && QUESTIONS[a.q].options.some(([k]) => k === a.value));
+  return { id: raw.id.slice(0, 60), created: String(raw.created || '').slice(0, 30), note: String(raw.note || '').slice(0, 300), routine: { mode: 'days', days: Object.fromEntries(C.DOW.map((d) => [d, { wake: days[d].wake, leave: days[d].leave || '', back: days[d].back || '', sleep: days[d].sleep }])) }, buildingMode: raw.buildingMode || null, answers };
+}
+const dayLine = (r) => (r.leave && r.back ? `away ${C.fmtMin(C.toMin(r.leave))}–${C.fmtMin(C.toMin(r.back))}` : 'home all day') + `, up ${C.fmtMin(C.toMin(r.wake))}, bed ${C.fmtMin(C.toMin(r.sleep))}`;
+/** Line-by-line preview: each day now → after, the building season, and the answers to be recorded. */
+export function previewHousehold(state, update) {
+  const lines = C.DOW.map((d) => { const now = dayLine(C.routineFor(state.profile.routine, d)), next = dayLine(update.routine.days[d]); return { day: C.DAY_NAME[d], now, next, changed: now !== next }; });
+  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
+}
+/** New state with the confirmed facts applied. Investigation-specific answers are tied to the investigation open right now. */
+export function applyHousehold(state, update, { investigationKey = '', today = '' } = {}) {
+  const out = structuredClone(state);
+  out.profile.routine = { ...out.profile.routine, mode: 'days', days: structuredClone(update.routine.days), weekday: { ...update.routine.days.Mon }, weekend: { ...update.routine.days.Sun } };
+  if (update.buildingMode) out.profile.buildingMode = update.buildingMode;
+  for (const a of update.answers) {
+    const scoped = QUESTIONS[a.q].scope === 'home';
+    out.answers = [...(out.answers || []), { q: a.q, key: scoped ? '' : investigationKey, value: a.value, at: today, since: '' }];
+  }
+  out.appliedUpdates = [...new Set([...(out.appliedUpdates || []), update.id])];
+  return migrate(out);
+}
+/** After saving: does every day read back exactly as intended? */
+export function verifyHousehold(saved, update) {
+  const bad = C.DOW.filter((d) => JSON.stringify(saved.profile.routine.days[d]) !== JSON.stringify(update.routine.days[d]));
+  if (saved.profile.routine.mode !== 'days') bad.push('mode');
+  if (update.buildingMode && saved.profile.buildingMode !== update.buildingMode) bad.push('buildingMode');
+  return { ok: !bad.length, bad };
 }
