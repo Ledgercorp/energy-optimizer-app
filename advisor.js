@@ -545,7 +545,7 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
   if (p.hvacMetered !== 'yes') cannot.push('How much of this is heating or cooling — it isn’t confirmed that they’re on your meter.');
   const others = patterns.filter((x) => !shown.includes(x));
   if (others.length) { const f = findings.find((x) => x.key === 'weekday' && x.title.includes(shown.find((y) => y.part === others[0].part)?.day)); if (f) f.detail += ` ${others.map((x) => `${x.day}s`).join(' and ')} show the same.`; }
-  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather, patterns: shown };
+  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather, patterns: shown, allPatterns: patterns };
 }
 
 // ---------- personalized recommendations ----------
@@ -617,7 +617,7 @@ export function opportunities({ state, rec, model, summary, report = null }) {
     if (hrsAway.length >= 3 && hrsEve.length >= 2) {
       const w = (hs) => avg(wdays.flatMap((d) => hs.map((h) => d.h[h]))) * 1000;
       const awayW = w(hrsAway), eveW = w(hrsEve), baseW = report.night.base;
-      if (awayW >= 0.85 * eveW && awayW > 1.5 * baseW && awayW - baseW >= 150) {
+      if (awayW >= 0.85 * eveW && awayW - baseW >= 150) { // the overnight floor can include heating, so compare with evenings first
         const extra = ((awayW - baseW) / 1000) * hrsAway.length * 21.7;
         push({ id: 'away-high', what: 'Check that the thermostat really eases off while you’re out', why: `Nobody should be home ${fmt(hrsAway.length)} hours on weekdays, yet use stays near evening levels. If heating or cooling runs as if you were home, the schedule isn’t taking effect — a HOLD on the thermostat is the usual cause.${meterNote}`, evidence: `Weekdays ${hr(l)}–${hr(b)}: about ${fmt(awayW)} W, vs. ${fmt(eveW)} W in the evening and ${fmt(baseW)} W at the quietest hour (${wdays.length} weekdays of hourly data).`, investigate: 'At midday, look at the thermostat: if it says HOLD AT, press RUN. Then compare the away temperature with the schedule on Today. Something else left running (a space heater, dehumidifier) shows the same pattern.', impact: `If daytime use fell to the overnight level, about ${fmt(extra)} kWh a month${money(extra)}.`, confidence: p.hvacMetered === 'no' ? 'low' : 'medium', confidenceWhy: 'Measured from your hourly data; the meter can’t show which device is running.', reprogram: true, thermostat: 'Check the thermostat (no reprogramming if the schedule is already set)' });
       }
@@ -653,7 +653,9 @@ export function opportunities({ state, rec, model, summary, report = null }) {
     push({ id: 'meter', what: 'Ask building management whether heating and cooling run on your apartment’s meter', why: 'It decides whether thermostat changes can lower your Delmarva bill or only the building’s.', evidence: hint, confidence: 'info', confidenceWhy: '' });
   }
   const order = { high: 0, medium: 1, low: 2, info: 3 };
-  return out.sort((a, b) => order[a.confidence] - order[b.confidence] || (b.est || 0) - (a.est || 0));
+  // Unexplained waste (no comfort cost) before comfort trade-offs (setbacks); then confidence; then size.
+  const tradeoff = (o) => (/^(heat|cool)-/.test(o.id) ? 1 : 0);
+  return out.sort((a, b) => (a.confidence === 'info') - (b.confidence === 'info') || tradeoff(a) - tradeoff(b) || order[a.confidence] - order[b.confidence] || (b.est || 0) - (a.est || 0));
 }
 
 /** When nothing is worth changing, say what the data showed instead. */
