@@ -37,7 +37,10 @@ export function migrate(raw) {
     use: str(z.use, 60), metered: MET.includes(z.metered) ? z.metered : 'unknown', heat: temp(z.heat, dc.heat), cool: temp(z.cool, dc.cool) }));
   s.moveIn = isDate(raw?.moveIn) ? raw.moveIn : '';
   s.bills = cleanBills(raw?.bills);
-  s.projection = raw?.projection && isMoney(+raw.projection.amount) ? { amount: +raw.projection.amount, asOf: isIso(raw.projection.asOf) ? raw.projection.asOf : '' } : null;
+  s.projection = cleanProjection(raw?.projection);
+  s.notes = arr(raw?.notes).filter((n) => n && typeof n.text === 'string' && isIso(n.at)).slice(-40).map((n) => ({ text: str(n.text, 300), at: n.at }));
+  const ub = raw?.profile?.usualBill;
+  if (ub && Number.isFinite(+ub.low) && Number.isFinite(+ub.high) && +ub.low > 0 && +ub.high >= +ub.low && +ub.high < 10000) s.profile.usualBill = { low: +ub.low, high: +ub.high, source: 'you' }; else delete s.profile.usualBill; // Number.isFinite(+ub.low) && Number.isFinite(+ub.high) && +ub.low > 0 && +ub.high >= +ub.low && +ub.high < 10000 ? { low: +ub.low, high: +ub.high, source: 'you' } : null;
   s.appliedUpdates = arr(raw?.appliedUpdates).filter((x) => typeof x === 'string').slice(-20).map((x) => x.slice(0, 60));
   s.version = STATE_VERSION;
   return s;
@@ -52,7 +55,8 @@ export const planFingerprint = (plans) => JSON.stringify(plans.map((p) => [p.mod
  * The app cannot see the thermostat, so "ok" means "you programmed the current recommendation", nothing more.
  */
 export function todayStatus(state, rec) {
-  if (!state.profile.setupDone) return { kind: 'setup' };
+  const su = setupInfo(state);
+  if (!su.complete) return { kind: 'setup', missing: su.missing };
   if (rec.errors.length) return { kind: 'error', message: rec.errors[0] };
   if (!rec.plans.length) return { kind: 'off' };
   const same = state.programmed?.fingerprint === planFingerprint(rec.plans);
@@ -1118,7 +1122,7 @@ export const QUESTIONS = {
     why: 'If the heat came on recently, colder days explain part of the change, and the heating schedule becomes the lever.',
     options: [['yes', 'Yes, the heat is on'], ['no', 'No, not yet'], ['unknown', 'I’m not sure']],
     effect: { heating: { yes: 1, no: -3 }, cooling_weather: { yes: -3 }, cooling_setting: { yes: -3 }, space_heater: { no: 1 } },
-    known: (s) => (s.profile.setupDone && s.profile.buildingMode === 'heat_available' ? 'yes' : s.profile.setupDone && s.profile.buildingMode === 'cool_available' ? 'no' : null),
+    known: (s) => (setupInfo(s).complete && s.profile.buildingMode === 'heat_available' ? 'yes' : setupInfo(s).complete && s.profile.buildingMode === 'cool_available' ? 'no' : null),
   },
   new_appliance: {
     kinds: ['change', 'standby', 'overnight'],
@@ -1154,6 +1158,7 @@ export const QUESTIONS = {
     why: 'A space heater draws 1,000–1,500 W while on — a steady daytime load in the readings.',
     options: [['yes', 'Yes'], ['no', 'No'], ['unknown', 'I’m not sure']],
     effect: { space_heater: { yes: 3, no: -3 }, daytime_load: { yes: 1 } },
+    coveredBy: ['daytime_device'], // already answered there (it names space heaters) — never asked twice
   },
   more_appliances: {
     kinds: ['change'],
@@ -1293,7 +1298,7 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
   let question = null, best = 0;
   const lead0 = [...hyps].sort((a, b) => (weight[b.status] ?? 0) - (weight[a.status] ?? 0))[0];
   for (const [qid, q] of qs) {
-    if (answerFor(state, qid, key)) continue;
+    if (answerFor(state, qid, key) || (q.coveredBy || []).some((c) => answerFor(state, c, key))) continue;
     // Can it confirm or rule out the leading explanation? Then how many other live explanations does it touch?
     const ws = Object.keys(q.effect).map((hid) => weight[hyps.find((x) => x.id === hid)?.status] ?? 0).sort((a, b) => b - a);
     let w = (ws[0] ?? 0) + 0.5 * ws.slice(1).reduce((a, x) => a + x, 0) + (lead0 && q.effect[lead0.id] && (weight[lead0.status] ?? 0) > 0 ? 1 : 0);
@@ -1619,13 +1624,16 @@ function validateHousehold(raw) {
   for (const d of C.DOW) C.buildDay(days[d], { home: 70, away: 68, sleep: 68 }, 30); // throws with a plain reason for an impossible routine
   if (raw.buildingMode && !(raw.buildingMode in C.BUILDING_MODES)) throw new Error('Unknown building season in the update.');
   const answers = (Array.isArray(raw.answers) ? raw.answers : []).filter((a) => QUESTIONS[a.q] && QUESTIONS[a.q].options.some(([k]) => k === a.value));
-  return { id: raw.id.slice(0, 60), created: String(raw.created || '').slice(0, 30), note: String(raw.note || '').slice(0, 300), routine: { mode: 'days', days: Object.fromEntries(C.DOW.map((d) => [d, { wake: days[d].wake, leave: days[d].leave || '', back: days[d].back || '', sleep: days[d].sleep }])) }, buildingMode: raw.buildingMode || null, answers };
+  const notes = (Array.isArray(raw.notes) ? raw.notes : []).filter((t) => typeof t === 'string' && t.trim()).slice(0, 20).map((t) => t.trim().slice(0, 300));
+  const ub = raw.usualBill && Number.isFinite(+raw.usualBill.low) && Number.isFinite(+raw.usualBill.high) && +raw.usualBill.low > 0 && +raw.usualBill.high >= +raw.usualBill.low ? { low: +raw.usualBill.low, high: +raw.usualBill.high } : null;
+  const base = { id: raw.id.slice(0, 60), created: String(raw.created || '').slice(0, 30), note: String(raw.note || '').slice(0, 300), routine: { mode: 'days', days: Object.fromEntries(C.DOW.map((d) => [d, { wake: days[d].wake, leave: days[d].leave || '', back: days[d].back || '', sleep: days[d].sleep }])) }, buildingMode: raw.buildingMode || null, answers };
+  return { ...base, notes, usualBill: ub };
 }
 const dayLine = (r) => (r.leave && r.back ? `away ${C.fmtMin(C.toMin(r.leave))}–${C.fmtMin(C.toMin(r.back))}` : 'home all day') + `, up ${C.fmtMin(C.toMin(r.wake))}, bed ${C.fmtMin(C.toMin(r.sleep))}`;
 /** Line-by-line preview: each day now → after, the building season, and the answers to be recorded. */
 export function previewHousehold(state, update) {
   const lines = C.DOW.map((d) => { const now = dayLine(C.routineFor(state.profile.routine, d)), next = dayLine(update.routine.days[d]); return { day: C.DAY_NAME[d], now, next, changed: now !== next }; });
-  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
+  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, notes: update.notes || [], usualBill: update.usualBill || null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change', daytime_device: 'Anything new running for hours in the day', new_appliance: 'Something new running day and night', cooling_longer: 'Cooling running longer than usual', fan_mode: 'Thermostat fan setting' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
 }
 /** New state with the confirmed facts applied. Investigation-specific answers are tied to the investigation open right now. */
 export function applyHousehold(state, update, { investigationKey = '', today = '' } = {}) {
@@ -1633,9 +1641,13 @@ export function applyHousehold(state, update, { investigationKey = '', today = '
   out.profile.routine = { ...out.profile.routine, mode: 'days', days: structuredClone(update.routine.days), weekday: { ...update.routine.days.Mon }, weekend: { ...update.routine.days.Sun } };
   if (update.buildingMode) out.profile.buildingMode = update.buildingMode;
   for (const a of update.answers) {
-    const scoped = QUESTIONS[a.q].scope === 'home';
-    out.answers = [...(out.answers || []), { q: a.q, key: scoped ? '' : investigationKey, value: a.value, at: today, since: '' }];
+    const scoped = QUESTIONS[a.q].scope === 'home', key = scoped ? '' : investigationKey;
+    if (answerFor(out, a.q, key)?.source === 'you' && answerFor(out, a.q, key).value === a.value) continue; // already recorded: don't duplicate
+    out.answers = [...(out.answers || []), { q: a.q, key, value: a.value, at: today, since: '' }];
   }
+  const have = new Set((out.notes || []).map((n) => n.text));
+  out.notes = [...(out.notes || []), ...(update.notes || []).filter((t) => !have.has(t)).map((text) => ({ text, at: today }))];
+  if (update.usualBill) out.profile.usualBill = { ...update.usualBill, source: 'you' };
   out.appliedUpdates = [...new Set([...(out.appliedUpdates || []), update.id])];
   return migrate(out);
 }
@@ -1644,6 +1656,8 @@ export function verifyHousehold(saved, update) {
   const bad = C.DOW.filter((d) => JSON.stringify(saved.profile.routine.days[d]) !== JSON.stringify(update.routine.days[d]));
   if (saved.profile.routine.mode !== 'days') bad.push('mode');
   if (update.buildingMode && saved.profile.buildingMode !== update.buildingMode) bad.push('buildingMode');
+  if (update.usualBill && (saved.profile.usualBill?.low !== update.usualBill.low || saved.profile.usualBill?.high !== update.usualBill.high)) bad.push('usual bill');
+  if ((update.notes || []).some((t) => !(saved.notes || []).some((n) => n.text === t))) bad.push('notes');
   return { ok: !bad.length, bad };
 }
 
@@ -1806,7 +1820,7 @@ QUESTIONS.away_home = {
  * Hours the routine says nobody is home vs. what the meter shows. Compares the latest occurrences with this household's own earlier ones
  * and with a quiet night. It never says what ran: cooling, a timer, laundry or a visitor would all look alike in hourly readings.
  */
-export function unoccupiedUse({ state, now = Date.now() }) {
+export function unoccupiedUse({ state, now = Date.now(), temps = {} }) {
   const p = state.profile, out = [];
   const hourly = hourlyByDay(state.usage, C.dailyTotals(state.usage).map((d) => d.date));
   if (hourly.length < 28) return out;
@@ -1825,15 +1839,22 @@ export function unoccupiedUse({ state, now = Date.now() }) {
     const typical = median(earlier.map((o) => o.w)), cut = Math.max(typical * 1.5, typical + 800);
     const hi = recent.filter((o) => o.w > cut);
     const otherDays = hourly.filter((d) => dow(d.date) !== day && d.date >= recent[0].date).map((d) => avg(d.h.slice(h0, h1)) * 1000);
+    // The same hours on other (occupied) days with about the same outdoor temperature as each of the latest occurrences.
+    const wm = recent.flatMap((o) => { const t = temps[o.date]; return Number.isFinite(t) ? hourly.filter((d) => dow(d.date) !== day && Number.isFinite(temps[d.date]) && Math.abs(temps[d.date] - t) <= 3).map((d) => avg(d.h.slice(h0, h1)) * 1000) : []; });
+    const weatherMatched = wm.length >= 6 ? avg(wm) : null;
     const key = `away:${day}:${recent[recent.length - 1].date}`;
     const answer = answerFor(state, 'away_home', key);
     const flagged = hi.length >= 2;
     out.push({
       id: `away-${day}`, day, key, window: `${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}`, flagged, explained: !!(answer && ['home', 'timer'].includes(answer.value)), answer: answer?.value || null,
       recent: recent.map((o) => ({ date: o.date, w: r0(o.w) })), earlier_typical_w: r0(typical), quiet_night_w: r0(nightW), other_days_same_hours_w: otherDays.length ? r0(avg(otherDays)) : null,
+      weather_matched_w: weatherMatched != null ? r0(weatherMatched) : null, weather_matched_n: wm.length,
+      timing: `Readings are hourly totals — the average power over each hour, not momentary peaks — starting on the hour in local time. ${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)} lies entirely inside your away time (${C.fmtMin(C.toMin(r.leave))}–${C.fmtMin(C.toMin(r.back))}).`,
+      occupied_like: otherDays.length && hi.length ? Math.abs(avg(hi.map((o) => o.w)) / avg(otherDays) - 1) <= 0.35 : null,
       headline: flagged ? `${C.DAY_NAME[day]} ${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}, when nobody’s home, used ${fmt(Math.min(...hi.map((o) => o.w)) / 1000, 1)}–${fmt(Math.max(...hi.map((o) => o.w)) / 1000, 1)} kW on ${hi.length} of the last ${recent.length} ${C.DAY_NAME[day]}s.`
         : `${C.DAY_NAME[day]} ${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)} (nobody home) looks consistent with earlier weeks.`,
       detail: `Earlier ${C.DAY_NAME[day]}s averaged about ${fmt(typical)} W in these hours; the latest ${recent.length}: ${recent.map((o) => `${md(o.date)} ${fmt(o.w)} W`).join(', ')}. A quiet night draws about ${fmt(nightW)} W${otherDays.length ? `, and the same hours on other days (when people are home) average ${fmt(avg(otherDays))} W` : ''}.`,
+      comparison: otherDays.length ? `The same hours on other days, when people are home, average ${fmt(avg(otherDays))} W${weatherMatched != null ? `; on other days with about the same outdoor temperature, ${fmt(weatherMatched)} W` : ''}. ${hi.length && Math.abs(avg(hi.map((o) => o.w)) / avg(otherDays) - 1) <= 0.35 ? 'So the empty-apartment hours use about as much as occupied ones — that points to something that runs on its own (cooling cycling, a fridge, a timer) rather than something a person switches on. The readings can’t say which.' : ''}` : '',
       uncertainty: 'Hourly whole-home readings can’t say what ran. Cooling, a timer, laundry, a dehumidifier or someone being home would look the same, and the app doesn’t assume it is the air conditioning.',
       check: `Next ${C.DAY_NAME[day]}, look at what is running at ${C.fmtMin(h0 * 60)}: thermostat (HOLD or schedule), anything on a timer, and whether the building’s cooling is active. Then import the new readings and see whether it repeats.`,
       question: flagged && !answer ? { id: 'away_home', key, text: QUESTIONS.away_home.text({ dates: hi.map((o) => md(o.date)).join(', ').replace(/, ([^,]*)$/, ' and $1') }), why: QUESTIONS.away_home.why, options: QUESTIONS.away_home.options } : null,
@@ -1842,34 +1863,97 @@ export function unoccupiedUse({ state, now = Date.now() }) {
   return out.filter((o) => o.flagged);
 }
 
-// ---------- bills: what is measured, what is estimated, what is only a statement or a projection ----------
+// ================= Setup: what the app already knows =================
 
-const isMoney = (x) => Number.isFinite(x) && x >= 0 && x < 100000;
-/** Sanitize user-entered statements: { id, start?, end, kwh?, amount }. Nothing is inferred for missing fields. */
+/**
+ * Setup is complete when the two things the schedule needs are known: the building's season and a routine the household confirmed
+ * (finished setup, a per-day routine, or an applied household update). Comfort temperatures and the meter question are optional.
+ * Nothing here is written back: an unknown stays unknown.
+ */
+export function setupInfo(state) {
+  const p = state.profile, missing = [];
+  const routineKnown = !!(p.setupDone || p.routine?.mode === 'days' || (state.appliedUpdates || []).length);
+  if (p.buildingMode === 'unknown' || !p.buildingMode) missing.push({ field: 'buildingMode', label: 'Whether your building is heating or cooling now', why: 'The schedule needs to know which system is running.' });
+  if (!routineKnown) missing.push({ field: 'routine', label: 'Your daily routine', why: 'Wake, away and sleep times decide when the schedule changes.' });
+  const optional = [];
+  if (p.hvacMetered === 'unknown') optional.push({ field: 'hvacMetered', label: 'Whether heating and cooling are on your meter', why: 'Only matters for how much thermostat changes can lower your bill.' });
+  return { complete: !!p.setupDone || missing.length === 0, missing, optional };
+}
+
+// ================= Bills: statements, reconciliation, drivers, estimates =================
+
+const isMoney = (x) => Number.isFinite(x) && Math.abs(x) < 100000;
+const optNum = (v) => (v === '' || v == null || !Number.isFinite(+v) ? null : +v);
+const BILL_PARTS = ['supply', 'delivery', 'fixed', 'taxes', 'credits', 'adjustments', 'priorBalance', 'payments', 'totalDue'];
+/**
+ * Statements the household entered (by hand or from a PDF they reviewed). Only `end` and `amount` (current-period charges) are required;
+ * every other field stays null when unknown. credits are positive numbers that reduce the bill; adjustments are signed.
+ */
 export function cleanBills(list) {
-  return (Array.isArray(list) ? list : []).filter((b) => b && isIso(b.end) && isMoney(+b.amount)).slice(-60).map((b) => ({
-    id: String(b.id || `${b.end}|${b.amount}`).slice(0, 60), start: isIso(b.start) ? b.start : '', end: b.end, kwh: Number.isFinite(+b.kwh) && +b.kwh > 0 ? +b.kwh : null, amount: +b.amount, at: isIso(b.at) ? b.at : '' }))
-    .sort((a, b) => (a.end < b.end ? -1 : 1));
+  return (Array.isArray(list) ? list : []).filter((b) => b && isIso(b.end) && isMoney(+b.amount) && +b.amount >= 0).slice(-60).map((b) => {
+    const out = { id: String(b.id || `${b.end}|${b.amount}`).slice(0, 60), start: isIso(b.start) && b.start < b.end ? b.start : '', end: b.end, kwh: optNum(b.kwh) > 0 ? +b.kwh : null, amount: +b.amount,
+      days: Number.isInteger(+b.days) && +b.days > 0 && +b.days < 100 ? +b.days : null, estimatedRead: b.estimatedRead === true, source: b.source === 'pdf' ? 'pdf' : 'manual', at: isIso(b.at) ? b.at : '' };
+    for (const k of BILL_PARTS) out[k] = isMoney(optNum(b[k])) ? optNum(b[k]) : null;
+    return out;
+  }).sort((a, b) => (a.end < b.end ? -1 : 1));
+}
+export function cleanProjection(p) {
+  if (!p || !isMoney(+p.amount) || +p.amount < 0) return null;
+  return { amount: +p.amount, asOf: isIso(p.asOf) ? p.asOf : '', periodEnd: isIso(p.periodEnd) ? p.periodEnd : '', source: 'manual' };
+}
+
+/** Billed days: the statement's own count when entered, else end − start (meter read to meter read). */
+const billedDays = (b) => b.days || (b.start ? isoGap(b.start, b.end) : null);
+/** Energy price per kWh without fixed charges, credits and adjustments — only from parts the statement actually shows. */
+function variablePrice(b) {
+  if (!b.kwh) return null;
+  if (b.supply != null && b.delivery != null) return (b.supply + b.delivery) / b.kwh;
+  if (b.fixed != null) return (b.amount - b.fixed - (b.taxes ?? 0) + (b.credits ?? 0) - (b.adjustments ?? 0)) / b.kwh;
+  return null;
+}
+
+/** Why one statement differs from another, split into parts that are each computed from entered figures; anything else is "other / unexplained". */
+export function billDrivers(prev, cur, { tempPrev = null, tempCur = null } = {}) {
+  const out = [], dP = billedDays(prev), dC = billedDays(cur), total = cur.amount - prev.amount;
+  const known = [];
+  if (prev.kwh && cur.kwh && dP && dC) {
+    const p0 = (prev.amount - (prev.credits ? -prev.credits : 0) - (prev.adjustments ?? 0) - (prev.fixed ?? 0)) / prev.kwh; // earlier price per kWh incl. taxes, before credits/adjustments
+    const kd0 = prev.kwh / dP, kd1 = cur.kwh / dC;
+    const days = (dC - dP) * kd0 * p0, use = dC * (kd1 - kd0) * p0;
+    out.push({ id: 'days', label: `${dC} billed days vs ${dP}`, amount: r2(days), status: 'confirmed' });
+    out.push({ id: 'usage', label: `${fmt(kd1, 1)} kWh a day vs ${fmt(kd0, 1)}`, amount: r2(use), status: 'confirmed' });
+    known.push(days, use);
+    const vp = variablePrice(prev), vc = variablePrice(cur);
+    if (vp != null && vc != null) { const pr = cur.kwh * (vc - vp); out.push({ id: 'price', label: `energy price ${fmt(vc * 100, 2)}¢ vs ${fmt(vp * 100, 2)}¢ per kWh`, amount: r2(pr), status: 'confirmed' }); known.push(pr); }
+  }
+  for (const [k, label, sign] of [['fixed', 'fixed charges', 1], ['credits', 'credits', -1], ['adjustments', 'adjustments', 1]]) {
+    if (prev[k] != null && cur[k] != null && Math.abs(cur[k] - prev[k]) >= 0.005) { const v = sign * (cur[k] - prev[k]); out.push({ id: k, label: `${label} ${money(cur[k])} vs ${money(prev[k])}`, amount: r2(v), status: 'confirmed' }); known.push(v); }
+    else if ((prev[k] == null) !== (cur[k] == null) && (prev[k] || cur[k])) out.push({ id: k, label: `${label} shown on only one statement`, amount: null, status: 'unknown' });
+  }
+  const rest = total - known.reduce((a, x) => a + x, 0);
+  if (out.length && Math.abs(rest) >= 0.5) out.push({ id: 'other', label: 'everything else (taxes, rounding, prices or charges not entered)', amount: r2(rest), status: 'unexplained' });
+  if (tempPrev != null && tempCur != null && Math.abs(tempCur - tempPrev) >= 3) out.push({ id: 'weather', label: `outdoor average ${fmt(tempCur)}°F vs ${fmt(tempPrev)}°F`, amount: null, status: 'possible' });
+  return { total: r2(total), drivers: out };
 }
 
 /**
- * Month-by-month and statement-by-statement view of the electricity bill. Sources are kept apart:
- *  measured kWh (the readings) · interval-cost estimate (the file's per-hour costs: not a statement) · statements you entered · a projection you entered.
- * Billing dates are never guessed: without statements the app shows calendar months and rolling 30-day stretches and says so.
+ * The bill picture, keeping sources apart:
+ *  measured (readings) · estimate (the file’s per-hour costs, or the app’s projection from your last statement) · statement (entered) · projection (Delmarva’s, entered by you).
+ * Billing dates are never guessed; without statements the app uses calendar months and rolling 30-day stretches and says so.
  */
-export function billView({ state, now = Date.now() }) {
+export function billView({ state, temps = {}, now = Date.now() }) {
   const days = C.dailyTotals(state.usage).filter((d) => d.complete);
   const byDate = new Map(days.map((d) => [d.date, d]));
   const missing = [], lines = [];
   const costOf = (ds) => (ds.length && ds.every((d) => d.cost != null) ? sum(ds.map((d) => d.cost)) : null);
-  // calendar months
+  const tempOf = (a, b) => { const t = Object.entries(temps).filter(([d, v]) => d >= a && d <= b && Number.isFinite(v)).map(([, v]) => v); return t.length >= 5 ? r1(avg(t)) : null; };
   const months = {};
   for (const d of days) (months[d.date.slice(0, 7)] ||= []).push(d);
   const monthRows = Object.entries(months).map(([m, ds]) => {
     const [y, mo] = m.split('-').map(Number), dim = new Date(Date.UTC(y, mo, 0)).getUTCDate(), kwh = sum(ds.map((d) => d.kwh)), cost = costOf(ds);
     return { month: m, days: ds.length, daysInMonth: dim, partial: ds.length < dim, kwh: r1(kwh), kwh_per_day: r1(kwh / ds.length), interval_cost: cost != null ? r2(cost) : null, cents_per_kwh: cost != null && kwh ? r2((cost / kwh) * 100) : null };
   });
-  // rolling 30-day stretches ending at the latest reading (not billing periods)
+  const flatPrice = (() => { const hrs = Object.keys(state.usage.hourly || {}).slice(-24 * 30); return hrs.length >= 24 * 7 && monthRows.length ? 'flat' : null; })();
   const stretches = [];
   if (days.length >= 30) {
     const last = days[days.length - 1].date;
@@ -1878,49 +1962,240 @@ export function billView({ state, now = Date.now() }) {
       if (ds.length >= 28) stretches.push({ from, to, days: ds.length, kwh: r1(sum(ds.map((d) => d.kwh))), interval_cost: costOf(ds) != null ? r2(costOf(ds)) : null });
     }
   }
-  // How the latest 30 days compare with every other 30-day stretch in the readings (not billing periods).
   let thirty = null;
   if (days.length >= 60) {
     const W30 = [];
     for (let i = 0; i + 30 <= days.length; i++) { const w = days.slice(i, i + 30); if (isoGap(w[0].date, w[29].date) === 29) W30.push({ from: w[0].date, to: w[29].date, kwh: sum(w.map((d) => d.kwh)), cost: costOf(w) }); }
     if (W30.length >= 10) {
       const k = W30.map((w) => w.kwh).sort((a, b) => a - b), latest = W30[W30.length - 1], lowest = W30.reduce((m, w) => (w.kwh < m.kwh ? w : m));
-      thirty = { typical_kwh: r0(quant(k, 0.5)), low_kwh: r0(k[0]), high_kwh: r0(k[k.length - 1]), latest: { ...latest, kwh: r0(latest.kwh) }, lowest: { ...lowest, kwh: r0(lowest.kwh), cost: lowest.cost != null ? r2(lowest.cost) : null }, n: W30.length,
+      thirty = { typical_kwh: r0(quant(k, 0.5)), low_kwh: r0(k[0]), high_kwh: r0(k[k.length - 1]), latest: { ...latest, kwh: r0(latest.kwh), cost: latest.cost != null ? r2(latest.cost) : null }, lowest: { ...lowest, kwh: r0(lowest.kwh), cost: lowest.cost != null ? r2(lowest.cost) : null }, n: W30.length,
         latest_vs_typical_pct: r0((latest.kwh / quant(k, 0.5) - 1) * 100) };
     }
   }
+
+  // Statements, reconciled with readings for exactly the same days.
   const bills = cleanBills(state.bills);
   const statements = bills.map((b) => {
-    const ds = b.start ? days.filter((d) => d.date >= b.start && d.date <= b.end) : [], billed = b.start ? isoGap(b.start, b.end) + 1 : null;
-    const covered = !!b.start && ds.length === billed, cost = covered ? costOf(ds) : null, kwh = covered ? sum(ds.map((d) => d.kwh)) : null;
-    return { ...b, billed_days: billed, readings_days: ds.length, covered, readings_kwh: kwh != null ? r1(kwh) : null, interval_cost: cost != null ? r2(cost) : null,
-      other_charges: cost != null ? r2(b.amount - cost) : null, kwh_gap_pct: kwh != null && b.kwh ? r1((b.kwh / kwh - 1) * 100) : null,
-      note: !b.start ? 'No start date entered, so it can’t be matched to readings.' : !covered ? `Your readings cover ${ds.length} of its ${billed} days.` : null };
+    const bd = billedDays(b);
+    const win = (a, z) => { const ds = []; for (let d = a; d <= z; d = isoAdd(d, 1)) if (byDate.has(d)) ds.push(byDate.get(d)); return ds; };
+    // Meter reads are taken on the start and end dates; the energy in between is either [start, end) or (start, end]. Both are shown.
+    const A1 = b.start ? win(b.start, isoAdd(b.end, -1)) : [], A2 = b.start ? win(isoAdd(b.start, 1), b.end) : [];
+    const covered = !!b.start && bd != null && A1.length === bd && A2.length === bd;
+    const k1 = covered ? sum(A1.map((d) => d.kwh)) : null, k2 = covered ? sum(A2.map((d) => d.kwh)) : null;
+    const kwhGap = covered && b.kwh ? Math.min(Math.abs(b.kwh - k1), Math.abs(b.kwh - k2)) / b.kwh : null;
+    const intervalCost = covered ? (costOf(A1) + costOf(A2)) / 2 : null;
+    const notes = [];
+    if (!b.start) notes.push('No start date entered, so it can’t be matched to readings.');
+    else if (!covered) notes.push(`Your readings cover ${Math.min(A1.length, A2.length)} of its ${bd} days.`);
+    if (b.estimatedRead) notes.push('Delmarva estimated the meter reading for this bill; a later bill corrects it, so its kWh may not match your readings.');
+    if (kwhGap != null && kwhGap > 0.03) notes.push(`Billed kWh differs from your readings by ${fmt(kwhGap * 100, 1)}% — more than rounding.`);
+    if (b.adjustments) notes.push('Includes an adjustment, which is left out of usage comparisons.');
+    return { ...b, billed_days: bd, covered, readings_kwh: k1 != null ? r1((k1 + k2) / 2) : null, readings_kwh_range: k1 != null ? [r1(Math.min(k1, k2)), r1(Math.max(k1, k2))] : null,
+      kwh_matches: kwhGap != null ? kwhGap <= 0.03 : null, interval_cost: intervalCost != null ? r2(intervalCost) : null, beyond_readings: intervalCost != null ? r2(b.amount - intervalCost) : null,
+      cost_per_day: bd ? r2(b.amount / bd) : null, kwh_per_day: bd && b.kwh ? r1(b.kwh / bd) : null, cents_per_kwh: b.kwh ? r2((b.amount / b.kwh) * 100) : null, variable_cents: variablePrice(b) != null ? r2(variablePrice(b) * 100) : null,
+      temp_f: b.start ? tempOf(b.start, b.end) : null, notes };
   });
-  if (!bills.length) missing.push('Your Delmarva statements (service dates, billed days, kWh, total, and the fixed-charge/tax lines). Without them the app can’t say which dates each bill covers.');
-  else if (statements.some((s) => !s.covered)) missing.push('Readings for every day of some statements, or their start dates, so those statements can’t be reconciled.');
-  missing.push('Delmarva’s own projection is only shown if you enter it; the app never forecasts a bill amount.');
-  const proj = state.projection && isMoney(+state.projection.amount) ? { amount: +state.projection.amount, asOf: isIso(state.projection.asOf) ? state.projection.asOf : '' } : null;
-  // What the figures say, source by source.
-  if (bills.length >= 2) {
+  if (!bills.length) missing.push('Your Delmarva statements: service dates, billed days, kWh, current charges, and if shown supply, delivery, fixed charges, taxes and credits. Without them the app can’t say which dates a bill covers or what is fixed vs. usage-driven.');
+  else if (statements.some((s) => !s.covered)) missing.push('Start dates (or readings for every day) for some statements, so they can’t be reconciled.');
+  const proj = cleanProjection(state.projection);
+  if (!proj) missing.push('Delmarva’s current projection, if you want it shown next to the measured numbers. The app never presents its own estimate as Delmarva’s.');
+
+  // Why the latest statement differs from the one before (only from entered figures).
+  let compare = null;
+  if (statements.length >= 2) {
     const a = statements[statements.length - 2], b = statements[statements.length - 1];
-    const dAmt = b.amount - a.amount, ea = a.kwh && a.billed_days ? a.amount / a.kwh : null;
-    lines.push({ kind: 'statement', text: `Statements you entered: ${money(a.amount)} (ending ${md(a.end)}) then ${money(b.amount)} (ending ${md(b.end)}) — ${dAmt >= 0 ? 'up' : 'down'} ${money(Math.abs(dAmt))}.` });
-    if (a.kwh && b.kwh && a.billed_days && b.billed_days) lines.push({ kind: 'statement', text: `Per billed day: ${money(a.amount / a.billed_days)} → ${money(b.amount / b.billed_days)}; kWh per day ${fmt(a.kwh / a.billed_days, 1)} → ${fmt(b.kwh / b.billed_days, 1)}.${ea ? ` Of the ${money(Math.abs(dAmt))} change, about ${money((b.kwh - a.kwh) * ea)} comes from the kWh difference at the earlier statement’s average price; the rest is price, days or other charges.` : ''}` });
+    compare = { prev: a, cur: b, ...billDrivers(a, b, { tempPrev: a.temp_f, tempCur: b.temp_f }) };
+    const others = statements.slice(0, -1).filter((s) => s.cost_per_day != null);
+    compare.typical_cost_per_day = others.length >= 2 ? r2(median(others.map((s) => s.cost_per_day))) : null;
+  }
+
+  // The app's own estimate for the period after the last statement: only with a complete last statement and readings since.
+  let estimate = null;
+  const last = statements[statements.length - 1];
+  if (last && last.billed_days && last.kwh) {
+    const since = days.filter((d) => d.date > last.end);
+    const price = last.variable_cents != null ? last.variable_cents / 100 : null;
+    if (since.length >= 7 && price != null) {
+      const kd = avg(since.map((d) => d.kwh)), sdd = sd(since.map((d) => d.kwh)) / Math.sqrt(since.length);
+      const len = last.billed_days, fixed = last.fixed ?? 0, taxesShare = last.taxes != null && last.amount ? last.taxes / last.amount : 0;
+      const at = (k) => (fixed + k * len * price) * (1 + (last.taxes != null ? taxesShare : 0)) - (last.credits ?? 0) * 0;
+      estimate = { low: r2(at(Math.max(0, kd - 2 * sdd))), high: r2(at(kd + 2 * sdd)), kwh_per_day: r1(kd), days_so_far: since.length, period_days: len, from: isoAdd(last.end, 0),
+        method: `Your ${since.length} days of readings since ${md(last.end)} (${fmt(kd, 1)} kWh a day) × ${len} days (the length of your last bill) × your last bill’s energy price (${fmt(last.variable_cents, 2)}¢), plus its fixed charges${last.taxes != null ? ' and tax rate' : ''}. Assumes prices and the period length don’t change and no credits apply.` };
+    } else if (since.length >= 7) missing.push('Supply and delivery charges (or the fixed customer charge) on your latest statement, so the app can separate price from usage and estimate the current bill.');
+  }
+
+  // Lines, source by source.
+  if (compare) {
+    const { prev: a, cur: b } = compare;
+    lines.push({ kind: 'statement', text: `Statements you entered: ${money(a.amount)} (${a.billed_days ?? '?'} days to ${md(a.end)}) then ${money(b.amount)} (${b.billed_days ?? '?'} days to ${md(b.end)}) — ${compare.total >= 0 ? 'up' : 'down'} ${money(Math.abs(compare.total))}.` });
+    if (compare.drivers.length) lines.push({ kind: 'statement', text: `Why: ${compare.drivers.filter((x) => x.amount != null).map((x) => `${x.label}: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}${x.status === 'unexplained' ? ' (not explained by entered figures)' : ''}`).join('; ')}.${compare.drivers.some((x) => x.status === 'possible') ? ` Possible, not measured: ${compare.drivers.filter((x) => x.status === 'possible').map((x) => x.label).join('; ')}.` : ''}` });
   }
   const covered = statements.filter((s) => s.covered);
-  if (covered.length) lines.push({ kind: 'reconciled', text: `Matching ${covered.length} statement${covered.length === 1 ? '' : 's'} to your readings: the statement total minus the readings’ per-hour costs was ${covered.map((s) => money(s.other_charges)).join(', ')}. That difference can be fixed charges, taxes, fees, a different rate or credits; the file can’t split it.` });
-  if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection you entered: ${money(proj.amount)}${proj.asOf ? ` (as of ${md(proj.asOf)})` : ''}. It is the utility’s number, not the app’s.` });
+  if (covered.length) lines.push({ kind: 'reconciled', text: `Matched to your readings for the same days: ${covered.map((s) => `to ${md(s.end)}: billed ${s.kwh ? fmt(s.kwh) : '?'} kWh vs measured ${fmt(s.readings_kwh)} kWh${s.kwh_matches === false ? ' (more than rounding apart)' : ''}; statement minus the file’s per-hour costs ${money(s.beyond_readings)}`).join(' · ')}. That difference can be fixed charges, taxes, fees, a different price or credits; the file can’t split it.` });
+  if (estimate) lines.push({ kind: 'estimate', text: `App estimate for the bill after ${md(last.end)}: ${money(estimate.low)}–${money(estimate.high)}. ${estimate.method}` });
+  if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection, entered by you: ${money(proj.amount)}${proj.asOf ? ` (as of ${md(proj.asOf)})` : ''}. It is Delmarva’s number, not the app’s.${estimate ? ` The app’s estimate is ${money(estimate.low)}–${money(estimate.high)}${proj.amount < estimate.low || proj.amount > estimate.high ? ' — they differ; Delmarva may expect different days, prices or usage' : ''}.` : ''}` });
   if (thirty) {
     const t = thirty, near = Math.abs(t.latest_vs_typical_pct) < 8;
     lines.push({ kind: 'measured', text: `Measured: any 30 days in your readings used ${fmt(t.low_kwh)}–${fmt(t.high_kwh)} kWh (typical ${fmt(t.typical_kwh)}). The latest 30 days (${md(t.latest.from)}–${md(t.latest.to)}): ${fmt(t.latest.kwh)} kWh — ${near ? 'about typical' : `${fmt(Math.abs(t.latest_vs_typical_pct))}% ${t.latest_vs_typical_pct > 0 ? 'above' : 'below'} typical`}.` });
-    lines.push({ kind: 'measured', text: `Your lightest 30 days were ${md(t.lowest.from)}–${md(t.lowest.to)}: ${fmt(t.lowest.kwh)} kWh${t.lowest.cost != null ? ` (about ${money(t.lowest.cost)} by the file’s per-hour costs)` : ''}. A bill whose dates fall mostly in a stretch like that would come in lower than usual; which bill that is depends on your billing dates, which the file doesn’t contain.` });
+    lines.push({ kind: 'measured', text: `Your lightest 30 days were ${md(t.lowest.from)}–${md(t.lowest.to)}: ${fmt(t.lowest.kwh)} kWh${t.lowest.cost != null ? ` (about ${money(t.lowest.cost)} by the file’s per-hour costs)` : ''}. A bill whose dates fall mostly in a stretch like that would come in lower than usual; which bill that is depends on your billing dates${bills.length ? '' : ', which the file doesn’t contain'}.` });
   }
   if (stretches.length >= 2) {
     const [c, p] = stretches, dk = c.kwh - p.kwh;
     lines.push({ kind: 'measured', text: `Measured: the latest 30 days (${md(c.from)}–${md(c.to)}) used ${fmt(c.kwh)} kWh vs ${fmt(p.kwh)} in the 30 before — ${dk >= 0 ? 'more' : 'less'} by ${fmt(Math.abs(dk))} kWh (${fmt(Math.abs(dk / p.kwh) * 100)}%). These are rolling stretches, not billing periods.` });
     if (c.interval_cost != null && p.interval_cost != null) lines.push({ kind: 'estimate', text: `Estimate from the file’s per-hour costs: ${money(c.interval_cost)} vs ${money(p.interval_cost)}. This is not a bill: it leaves out fixed charges, taxes and credits, and the file’s own totals aren’t verified against a statement.` });
   }
-  return { months: monthRows, stretches, thirty, statements, projection: proj, lines, missing, hasStatements: bills.length > 0 };
+  const usual = state.profile.usualBill && Number.isFinite(state.profile.usualBill.low) ? state.profile.usualBill : null;
+  return { months: monthRows, stretches, thirty, statements, projection: proj, estimate, compare, lines, missing, hasStatements: bills.length > 0, usual, flatPrice };
 }
 const money = (x) => `$${fmt(x, 2)}`;
+
+// ================= Savings: what is worth changing =================
+
+const SAVE_KIND = { measured: 'Measured', modelled: 'Modelled from your readings', illustrative: 'General rule of thumb', unknown: 'Can’t be estimated yet' };
+export const SAVINGS_KIND = SAVE_KIND;
+const EFFORT_W = { none: 1, low: 1, medium: 1.6, high: 3 }, CONF_W = { high: 1, medium: 0.6, low: 0.3 };
+
+/** Daily kWh against cooling degree days (base 65°F): slope, its standard error, and the days used. Simple least squares; nothing else is assumed. */
+function coolingSlope(days, temps) {
+  const pts = days.filter((d) => Number.isFinite(temps[d.date])).map((d) => [Math.max(0, temps[d.date] - 65), d.kwh]);
+  const n = pts.length, warm = pts.filter(([x]) => x > 0).length;
+  if (n < 30 || warm < 20) return null;
+  const mx = avg(pts.map((p) => p[0])), my = avg(pts.map((p) => p[1]));
+  const sxx = sum(pts.map(([x]) => (x - mx) ** 2)), sxy = sum(pts.map(([x, y]) => (x - mx) * (y - my)));
+  if (sxx <= 0) return null;
+  const b = sxy / sxx, a = my - b * mx, res = pts.map(([x, y]) => y - a - b * x), se = Math.sqrt(sum(res.map((r) => r * r)) / (n - 2) / sxx);
+  const r2v = 1 - sum(res.map((r) => r * r)) / sum(pts.map(([, y]) => (y - my) ** 2));
+  return { per_cdd: b, se, r2: r2v, n, warm };
+}
+
+/**
+ * Ranked opportunities from this household's readings. Each says what to change, why, the evidence, the savings and how they were
+ * estimated (measured / modelled / rule of thumb / unknown), confidence, effort, comfort impact and how to verify. Options that the
+ * evidence says aren't worth it are returned separately with the reason, so they aren't suggested again without new evidence.
+ */
+export function savingsPlan({ state, temps = {}, now = Date.now() }) {
+  const r = usageReport({ state, temps, now });
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete);
+  if (days.length < 14) return { items: [], considered: [], note: 'Needs about two weeks of readings to look for savings.', rate: rateFor(state) };
+  const rf = rateFor(state), rate = rf.rate, p = state.profile, metered = p.hvacMetered;
+  const $ = (k) => (rate != null ? r2(k * rate) : null);
+  const items = [], considered = [];
+  const add = (o) => {
+    const mid = o.savings.dollars ? (o.savings.dollars[0] + o.savings.dollars[1]) / 2 : o.savings.upTo ? o.savings.upTo * 0.25 : 0;
+    const score = (mid * CONF_W[o.confidence]) / EFFORT_W[o.effort] - (o.comfort === 'noticeable' ? 1 : 0);
+    items.push({ ...o, savings: { ...o.savings, label: SAVE_KIND[o.savings.kind] }, score: r2(score) });
+  };
+  const bl = r.baseline;
+
+  // 1. Cooling setpoint, from how much this home's use rises on warm days.
+  const cs = coolingSlope(days, temps);
+  const cdd = (from, to) => sum(Object.entries(temps).filter(([d, t]) => d >= from && d <= to && Number.isFinite(t)).map(([, t]) => Math.max(0, t - 65)));
+  if (cs && cs.per_cdd > 2 * cs.se && p.buildingMode !== 'heat_available') {
+    const lastYearSummer = days.filter((d) => d.date.slice(5, 7) >= '06' && d.date.slice(5, 7) <= '09'), sm = lastYearSummer.length ? cdd(lastYearSummer[0].date, lastYearSummer[lastYearSummer.length - 1].date) / (lastYearSummer.length / 30) : 0;
+    const coolMonth = cs.per_cdd * sm, lo = coolMonth * 0.02, hi = coolMonth * 0.04; // 2–4% of cooling energy per °F: general rule of thumb
+    const recentT = avg(days.slice(-14).map((d) => temps[d.date]).filter(Number.isFinite));
+    if (coolMonth >= 30 && metered !== 'no') add({ id: 'cooling-setpoint', thermostat: true,
+      action: 'Next warm season, set cooling 1°F warmer when you’re home (2°F at night if you sleep comfortably).',
+      why: `Your use rises about ${fmt(cs.per_cdd, 2)} kWh a day for each degree the day averages above 65°F (from ${cs.n} days). Over a summer month that weather-driven part is about ${fmt(coolMonth)} kWh.${recentT < 62 ? ' It’s cool now, so this matters little until it warms up.' : ''}`,
+      savings: { kind: 'modelled', kwhMonth: [r0(lo), r0(hi)], dollars: $(lo) != null ? [$(lo), $(hi)] : null, per: 'summer month', method: `Weather-driven kWh in a summer month (${fmt(cs.per_cdd, 2)} kWh per degree-day × ${fmt(sm)} degree-days) × 2–4% per °F, a general rule of thumb, not measured in your home.${rate != null ? ` Priced at ${rf.source}.` : ''}` },
+      confidence: cs.r2 >= 0.3 ? 'medium' : 'low', effort: 'low', comfort: 'slight', verify: 'Keep it for 2–3 warm weeks, then compare kWh with earlier days at the same outdoor temperature (Insights shows this).',
+      caveat: metered === 'unknown' ? 'Assumes cooling is on your meter — not yet confirmed.' : (cs.r2 < 0.3 ? `Weather explains only ${fmt(Math.max(0, cs.r2) * 100)}% of your day-to-day differences, so this estimate is rough.` : '') });
+    else considered.push({ id: 'cooling-setpoint', what: 'Raise the cooling setpoint', why: metered === 'no' ? 'Cooling isn’t on your meter.' : `Weather-driven use is small here (about ${fmt(coolMonth)} kWh in a summer month).` });
+  } else considered.push({ id: 'cooling-setpoint', what: 'Raise the cooling setpoint', why: cs ? 'Your readings don’t show use rising clearly with warmer days, so the effect can’t be estimated.' : 'Needs a month or more of warm-weather readings with temperatures.' });
+
+  // 2. Always-on load on mild nights.
+  const n = r.night;
+  if (n && n.mildNights >= 7) {
+    const floor = n.alwaysOn;
+    if (floor > 220) {
+      const lo = (Math.min(30, floor - 150) / 1000) * 24 * 30, hi = (Math.min(80, floor - 150) / 1000) * 24 * 30;
+      add({ id: 'standby', thermostat: false, action: 'Find and switch off things that stay on all night (a second fridge, old electronics on standby, chargers, a dehumidifier you don’t need).',
+        why: `On mild nights, when heating and cooling rest, your home still draws about ${fmt(floor)} W between 1 and 5 AM (measured on ${n.mildNights} nights). Many apartments sit around 150–220 W.`,
+        savings: { kind: 'illustrative', kwhMonth: [r0(lo), r0(hi)], dollars: $(lo) != null ? [$(lo), $(hi)] : null, per: 'month', method: 'If 30–80 W of that turns out to be avoidable (an assumption) × 24 h × 30 days.' },
+        confidence: 'medium', effort: 'low', comfort: 'none', verify: 'Switch suspects off for a week; the 1–5 AM level in the next import should drop by about that many watts.' });
+    } else considered.push({ id: 'standby', what: 'Cut always-on power', why: `Your mild-night floor is about ${fmt(floor)} W — already typical for an apartment.` });
+  } else considered.push({ id: 'standby', what: 'Cut always-on power', why: 'Needs a week of mild nights (no heating or cooling) to measure the always-on load.' });
+
+  // 3. A part of the day that is unusually high for this household.
+  const hiWin = (bl?.windows || []).filter((w) => w.flag === 'high').sort((a, b) => b.recent_w - b.usual_w - (a.recent_w - a.usual_w))[0];
+  if (hiWin) {
+    const hrs = BLOCKS[hiWin.name][1] - BLOCKS[hiWin.name][0], extra = ((hiWin.recent_w - hiWin.usual_w) * hrs * 30) / 1000, part = hiWin.name.replace(/ \(.*/, '');
+    add({ id: 'window', thermostat: false, action: `Walk through the apartment one ${part} and note what is running for hours (cooling, a computer, a dehumidifier, anything charging).`,
+      why: `${cap(part)}s lately average ${fmt(hiWin.recent_w)} W, higher than any earlier two weeks (usual ${fmt(hiWin.low_w)}–${fmt(hiWin.high_w)} W). The meter can’t say what it is, so whether any of it is avoidable is unknown.`,
+      savings: { kind: 'unknown', kwhMonth: null, dollars: null, upTo: $(extra), method: `The extra above your usual ${part}s is about ${fmt(extra)} kWh a month${$(extra) != null ? ` (≈ ${money($(extra))})` : ''}. That is an upper bound, and only if the cause is something you don’t need.` },
+      confidence: 'low', effort: 'low', comfort: 'none', verify: `After finding and changing anything, import a newer file: the ${part} level should fall back toward ${fmt(hiWin.usual_w)} W.` });
+  }
+
+  // 4. Hours nobody is home.
+  for (const a of unoccupiedUse({ state, now, temps })) {
+    if (a.explained) { considered.push({ id: a.id, what: `${C.DAY_NAME[a.day]} ${a.window} while nobody’s home`, why: 'You said someone was home or something runs on a schedule then.' }); continue; }
+    const hrs = (C.toMin(a.window.split('–')[1]) - C.toMin(a.window.split('–')[0])) / 60 || 2;
+    const extra = avg(a.recent.map((o) => Math.max(0, o.w - a.quiet_night_w))) * hrs * 4.3 / 1000; // kWh a month above a quiet night
+    const setback = extra * 0.25;
+    add({ id: a.id, thermostat: true, action: `Check what runs on ${C.DAY_NAME[a.day]}s ${a.window} — then, if it is the cooling, let the thermostat ease off 3–4°F for those hours.`,
+      why: `${a.headline} It is ${fmt(a.recent.length)} weeks of a ${fmt(hrs)}-hour window.`,
+      savings: { kind: 'modelled', kwhMonth: [0, r0(setback)], dollars: $(setback) != null ? [0, $(setback)] : null, upTo: $(extra), per: 'month',
+        method: `Use in that window above a quiet night is about ${fmt(extra, 1)} kWh a month at most${$(extra) != null ? ` (${money($(extra))})` : ''}. A short setback saves only part of it, because the apartment must be cooled again afterwards; 0–25% of it is assumed.` },
+      confidence: 'low', effort: 'low', comfort: 'none', verify: `If you change it, compare the next 4 ${C.DAY_NAME[a.day]}s’ ${a.window} readings with these.`,
+      caveat: 'Not worth a schedule change until you know what runs then; the possible saving is small.' });
+  }
+
+  // Considered, with the reason — so they aren't raised again without new evidence.
+  considered.push({ id: 'time-shift', what: 'Run laundry or dishes at other hours', why: 'Your per-hour price in the Delmarva file is the same at every hour, so shifting use saves nothing.' });
+  considered.push({ id: 'peaks', what: 'Avoid short peaks', why: 'Residential Delmarva bills charge for kWh, not for peaks, so short peaks cost the same as the energy they use.' });
+  const lampKwh = [0.07, 0.48]; // 2 lamps × 4 h: LED 9 W … incandescent 60 W
+  considered.push({ id: 'lighting', what: 'Lamps at night', why: `Two lamps for 4 hours use about ${fmt(lampKwh[0], 2)}–${fmt(lampKwh[1], 2)} kWh a night (LED vs. old bulbs) — at most about ${fmt(lampKwh[1] * 30)} kWh a month${$(lampKwh[1] * 30) != null ? ` (${money($(lampKwh[1] * 30))})` : ''}, too small to explain a daytime change.` });
+  const fanAns = answerFor(state, 'fan_mode', '');
+  considered.push({ id: 'fan', what: 'Thermostat fan AUTO instead of ON', why: fanAns?.value === 'auto' ? 'You said the fan is on AUTO.' : 'A fan left ON would raise use day and night; your nights didn’t rise, so it’s unlikely — still a free 10-second check on the thermostat.' });
+  considered.push({ id: 'equipment', what: 'New equipment (thermostat, AC, appliances)', why: 'No purchase has a payback case from your readings; the app won’t suggest spending money without one.' });
+
+  // Too small to be worth your time: keep the reason so it isn't suggested again without new evidence.
+  for (let i = items.length - 1; i >= 0; i--) {
+    const o = items[i], hi = o.savings.dollars ? o.savings.dollars[1] : null;
+    if (hi != null && hi < 1 && !(o.savings.upTo >= 5)) {
+      considered.unshift({ id: o.id, what: o.action, why: `Worth at most about ${money(hi)} a ${o.savings.per === 'summer month' ? 'summer month' : 'month'} by your readings${o.savings.upTo ? ` (even the most it could be is ${money(o.savings.upTo)})` : ''}. ${o.savings.method}`, small: true });
+      items.splice(i, 1);
+    }
+  }
+  items.sort((a, b) => b.score - a.score);
+  const normal = bl && ['typical', 'return_to_typical', 'unusually_low'].includes(bl.status);
+  return { items, considered, rate: rf, normal, baselineStatus: bl?.status || null,
+    note: normal ? 'Your use is normal for your home. Normal isn’t the same as efficient; these are the changes your readings can support.' : '' };
+}
+
+
+// ================= Statement text → fields for review (never saved without the household checking them) =================
+
+const amt = (x) => (x == null ? null : +String(x).replace(/[$,\s]/g, ''));
+const usDate = (m) => { if (!m) return ''; const [mo, d, y] = m.split('/').map(Number), yy = y < 100 ? 2000 + y : y; return yy > 2000 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 ? `${yy}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}` : ''; };
+/**
+ * Reads only clearly labelled figures from a statement's text. Anything not found stays empty; "Amount due" is never used as the
+ * current charges (it can include a prior balance). Returns { fields, found, notFound }.
+ */
+export function parseStatementText(text) {
+  const t = String(text || '').replace(/ /g, ' ');
+  const money1 = (re) => { const m = re.exec(t); return m ? amt(m[1]) : null; };
+  const D = String.raw`(\d{1,2}/\d{1,2}/\d{2,4})`;
+  const per = new RegExp(String.raw`(?:service|billing)\s+period[^\n\d]{0,40}` + D + String.raw`\s*(?:-|–|to|through|thru)\s*` + D, 'i').exec(t)
+    || new RegExp(String.raw`(?:service|meter read)[^\n]{0,30}from\s*` + D + String.raw`\s*(?:-|–|to|through)\s*` + D, 'i').exec(t);
+  const M = String.raw`[^\n$\d]{0,30}\$?\s*\(?(-?[\d,]+\.\d{2})\)?`;
+  const fields = {
+    start: per ? usDate(per[1]) : '', end: per ? usDate(per[2]) : '',
+    days: (() => { const m = /(?:number of days|billing days|days in (?:billing|service) period|days billed)[^\d\n]{0,15}(\d{2})\b/i.exec(t); return m ? +m[1] : null; })(),
+    kwh: (() => { const m = /(?:total\s+kwh(?:\s+used)?|kwh\s+used|total\s+usage|energy\s+used)[^\d\n]{0,25}([\d,]+(?:\.\d+)?)/i.exec(t); return m ? amt(m[1]) : null; })(),
+    amount: money1(new RegExp(String.raw`(?:total\s+)?current\s+(?:electric\s+)?charges` + M, 'i')),
+    supply: money1(new RegExp(String.raw`(?:total\s+)?(?:electric\s+)?supply\s+(?:charges|service)` + M, 'i')),
+    delivery: money1(new RegExp(String.raw`(?:total\s+)?(?:electric\s+)?(?:delivery|distribution)\s+(?:charges|service)` + M, 'i')),
+    fixed: money1(new RegExp(String.raw`customer\s+charge` + M, 'i')),
+    taxes: money1(new RegExp(String.raw`total\s+taxes(?:\s+and\s+(?:fees|surcharges))?` + M, 'i')),
+    credits: (() => { const v = money1(new RegExp(String.raw`(?:total\s+)?credits?(?!\s*card)` + M, 'i')); return v == null ? null : Math.abs(v); })(),
+    adjustments: money1(new RegExp(String.raw`adjustments?` + M, 'i')),
+    priorBalance: money1(new RegExp(String.raw`(?:previous|prior)\s+balance` + M, 'i')),
+    payments: (() => { const v = money1(new RegExp(String.raw`payments?(?:\s+received)?(?:\s*-\s*thank you)?` + M, 'i')); return v == null ? null : Math.abs(v); })(),
+    totalDue: money1(new RegExp(String.raw`(?:total\s+)?amount\s+due` + M, 'i')),
+    estimatedRead: /\bestimated\s+(?:meter\s+)?read(?:ing)?\b/i.test(t) ? true : /\bactual\s+(?:meter\s+)?read(?:ing)?\b/i.test(t) ? false : null,
+  };
+  if (fields.start && fields.end && fields.start >= fields.end) { fields.start = ''; fields.end = ''; }
+  const found = Object.entries(fields).filter(([, v]) => v !== null && v !== '').map(([k]) => k);
+  return { fields, found, notFound: Object.keys(fields).filter((k) => !found.includes(k)) };
+}

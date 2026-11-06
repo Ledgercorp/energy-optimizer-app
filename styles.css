@@ -281,7 +281,7 @@ body.in-flow .tabbar { display: none; }
 kbd.key { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 28px; padding: 0 8px; border-radius: 7px; background: var(--card); border: 1px solid var(--line); box-shadow: 0 2px 0 var(--line); font: 700 13px/1 -apple-system, BlinkMacSystemFont, sans-serif; color: var(--ink); vertical-align: 1px; }
 
 /* ---------- navigation ---------- */
-.tabbar { position: fixed; z-index: 10; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr); padding: 6px 8px calc(env(safe-area-inset-bottom) + 4px); background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: saturate(1.8) blur(20px); -webkit-backdrop-filter: saturate(1.8) blur(20px); border-top: .5px solid var(--line); }
+.tabbar { position: fixed; z-index: 10; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(5, 1fr); padding: 6px 4px calc(env(safe-area-inset-bottom) + 4px); background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: saturate(1.8) blur(20px); -webkit-backdrop-filter: saturate(1.8) blur(20px); border-top: .5px solid var(--line); }
 .tabbar .brand { display: none; }
 .tabbar a { display: flex; flex-direction: column; align-items: center; gap: 2px; min-height: 50px; justify-content: center; color: var(--ink-3); text-decoration: none; font-size: 11px; font-weight: 650; border-radius: 12px; }
 .tabbar a[aria-current="page"] { color: var(--tint); }
@@ -375,3 +375,14 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #0a6
 .bill-form { display: grid; gap: 8px; margin-top: 12px; }
 .bill-form input { width: 100%; }
 .normality h2 .kind-chip { font-size: 12px; }
+
+.billfirst .q + .q { margin-top: 14px; padding-top: 12px; border-top: .5px solid var(--line); }
+.billfirst h2 { margin: 2px 0 4px; }
+.opps { list-style: none; padding: 0; margin: 6px 0; }
+.opps li { padding: 6px 0; }
+.opps small, .bill-form small { display: block; color: var(--ink-3); }
+.facts { display: grid; grid-template-columns: minmax(96px, 30%) 1fr; gap: 4px 10px; margin: 8px 0; font-size: 14px; }
+.facts dt { color: var(--ink-3); }
+.facts dd { margin: 0; }
+.found { color: var(--accent, #0a66d8); }
+tr.sub td { border-top: 0; padding-top: 0; }
