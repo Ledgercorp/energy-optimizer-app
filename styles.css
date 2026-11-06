@@ -347,3 +347,12 @@ td small { display: block; color: var(--ink-3); font-size: 12px; font-weight: 40
 .learned > .btn.plain { margin-top: 10px; }
 .nochange { margin-bottom: 8px; }
 .learned .stats + .findings { margin-top: 16px; }
+.kind-chip { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 10px; background: var(--line); color: var(--ink-2); font-size: 11px; letter-spacing: 0; text-transform: none; vertical-align: middle; }
+.kind-tag { display: inline-block; margin: 2px 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+.findings li.hyp .kind-tag { color: var(--warn, #b25b00); }
+.card.ai hr { border: 0; border-top: .5px solid var(--line); margin: 14px 0; }
+.card.ai .row2 { margin-top: 12px; }
+.evidence { list-style: none; padding: 0; }
+.evidence li { padding: 6px 0; border-top: .5px solid var(--line); }
+.evidence code { display: block; font-size: 12px; color: var(--ink-2); word-break: break-word; white-space: pre-wrap; }
+button.link { background: none; border: 0; padding: 0; color: var(--accent, #0a66d8); font: inherit; cursor: pointer; text-decoration: underline; }
