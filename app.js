@@ -163,7 +163,7 @@ const TABS = [['today', 'Today'], ['insights', 'Insights'], ['settings', 'Settin
 const pagehead = (h, eyebrow = '') => `<header class="pagehead"><div>${eyebrow ? `<p class="eyebrow">${eyebrow}</p>` : ''}<h1>${h}</h1></div></header>`;
 const back = (href, label) => `<a class="back" href="#${href}">‹ ${label}</a>`;
 const disclosure = (id, summary, body, open = false) => `<details class="disclosure" data-id="${id}" ${open || UI.open?.[id] ? 'open' : ''}><summary>${summary}</summary><div class="disc-body">${body}</div></details>`;
-const importButton = (label = 'Import Delmarva file') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".csv,.xml,text/csv,text/xml,application/xml"></label>`;
+const importButton = (label = 'Import Delmarva file') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".zip,.csv,.xml,application/zip,text/csv,text/xml,application/xml"></label>`;
 const HOW_TO_DOWNLOAD = `<ol class="steps"><li>Sign in to <b>Delmarva My Account</b>.</li><li>Open <b>My Usage</b> → <b>Green Button: Download my data</b>.</li><li>Choose the longest date range and download <b>CSV</b> (or XML).</li><li>Come back and tap <b>Import Delmarva file</b>. The rest is automatic.</li></ol><p class="fine">Delmarva doesn’t let personal apps fetch usage without your password, and this app never asks for it. The file stays on this device.</p>`;
 const keys = (t) => esc(t)
   .replace(/\b(MENU|RUN|DONE|HOME|NEXT)\b/g, '<kbd class="key">$1</kbd>')
@@ -338,8 +338,9 @@ const validReport = (r) => r && r.version === 1 && ((r.kind === 'aeo-ai-analysis
 function decisionHtml(d, deep) {
   const sec = (d.secondary || []).map((x) => `<li>${esc(x.title)} — about ${num(x.impact_kwh_month)} kWh a month</li>`).join('');
   const assist = d.model ? (d.model.used ? `Prioritization assisted by ${esc(d.model.name)} (experimental decision model).` : `The experimental decision model (${esc(d.model.name)}) was consulted, but the tested rules decided${d.model.agreed_with_rules ? ' (it agreed)' : ' (it was not confident or not supported by the evidence)'}.`) : 'Prioritized by the app’s tested rules.';
-  return `<div class="decision"><p class="card-label">Highest priority</p><h3>${esc(d.title)}</h3><p>${esc(d.why)}${d.impact_kwh_month ? ` Measured: about ${num(d.impact_kwh_month)} kWh a month.` : ''}</p>
-    <p><i>Next:</i> ${esc(d.next)}</p>${(d.measurements || []).length ? `<ul class="bullets">${d.measurements.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
+  return `<div class="decision"><p class="card-label">Highest priority</p><h3>${esc(d.title)}</h3><p>${esc(d.why)}${d.impact_kwh_month ? ` ${d.priority === 'change' ? 'If it continues' : 'Size, from your readings'}: about ${num(d.impact_kwh_month)} kWh a month.` : ''}</p>
+    ${(d.measurements || []).length ? `<ul class="bullets">${d.measurements.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
+    ${(d.explanations || []).length ? `<p class="card-label">Possible explanations, tested against your readings</p><ul class="findings explain">${d.explanations.map((e) => `<li class="${e.verdict === 'supported' ? 'good' : e.verdict === 'ruled out' ? 'out' : ''}"><b>${esc(e.title)}</b><span class="kind-tag">${esc(e.verdict === 'supported' ? 'Supported by the data' : e.verdict === 'ruled out' ? 'Ruled out by the data' : 'Not yet clear')}</span><span>${esc(e.why)}</span>${e.verdict !== 'ruled out' ? `<span><i>What to do:</i> ${esc(e.action)}</span><span><i>How to check:</i> ${esc(e.check)}</span>` : ''}</li>`).join('')}</ul>` : `<p><i>Next:</i> ${esc(d.next)}</p>`}
     <p class="fine">${assist} ${deep ? 'Qwen then investigated this in depth (below).' : 'No deeper AI investigation was run.'}</p>
     ${sec ? disclosure('ai-secondary', 'Other findings worth a look', `<ul class="bullets">${sec}</ul>`) : ''}</div>`;
 }
@@ -352,6 +353,7 @@ function aiReportHtml(rp) {
   const ev = rp.evidence.map((e) => `<li><b>${esc(e.id)} · ${esc(e.tool.replace(/_/g, ' '))}${e.args && Object.keys(e.args).length ? ` (${esc(Object.values(e.args).join(', '))})` : ''}</b><code>${esc(JSON.stringify(e.result).slice(0, 600))}</code></li>`).join('');
   const rej = (rp.rejected || []).map((x) => `<li>${esc(x.title || x.kind)} — ${esc(x.why.join('; '))}</li>`).join('');
   return `${rp.decision ? decisionHtml(rp.decision, true) + '<hr>' : ''}${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
+    ${(a.explanations || []).length ? `<p class="card-label">Which explanation fits best (AI)</p><ul class="findings">${[...a.explanations, ...((rp.decision?.explanations || []).filter((x) => !a.explanations.some((e) => e.id === x.id)).map((x) => ({ title: x.title, verdict: x.verdict, assessment: 'not assessed by the AI', reasoning: x.why, evidence: [] })))].map((e) => `<li class="${e.assessment === 'most likely' ? 'good' : ''}"><b>${esc(e.title)}</b><span class="kind-tag">${esc(e.assessment)} · tests: ${esc(e.verdict)}</span><span>${esc(e.reasoning)}</span>${evIds(e.evidence)}</li>`).join('')}</ul>` : ''}
     ${disc ? `<p class="card-label">Discoveries</p><ul class="findings">${disc}</ul>` : '<p class="fine">No discoveries passed the evidence check.</p>'}
     ${recs ? `<p class="card-label">Recommended</p><ul class="findings actions">${recs}</ul>` : '<p class="fine">No recommendation passed the evidence check — nothing clearly worth changing.</p>'}
     ${a.next_checks.length ? `<p class="card-label">What to check next</p><ul class="bullets">${a.next_checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
@@ -904,9 +906,16 @@ async function importUsage(files) {
   render();
   const msgs = [];
   let bad = false;
+  const expanded = [];
+  for (const f of files) {
+    if (/\.zip$/i.test(f.name) || f.type === 'application/zip') {
+      try { if (f.size > 25e6) throw new Error('File is larger than 25 MB.'); for (const e of await C.unzipUsage(await f.arrayBuffer())) expanded.push({ name: e.name, text: e.text }); } catch (err) { bad = true; msgs.push(`Couldn’t open ${f.name}: ${err.message}`); }
+    } else expanded.push({ name: f.name, file: f });
+  }
+  files = expanded;
   for (const f of files) {
     try {
-      const res = C.importUsageFile(f.name, await readFile(f));
+      const res = C.importUsageFile(f.name, f.text ?? await readFile(f.file));
       const before = S.usage;
       S.usage = C.mergeUsage(S.usage, res.records); // merges by hour/day: never deletes history, never double-counts a re-import
       msgs.push(`${files.length > 1 ? `${f.name}: ` : 'Imported '}${A.importSummary(before, S.usage, res).message}`);
