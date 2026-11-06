@@ -2173,7 +2173,7 @@ export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   const hiWin = (bl?.windows || []).filter((w) => w.flag === 'high').sort((a, b) => b.recent_w - b.usual_w - (a.recent_w - a.usual_w))[0];
   if (hiWin) {
     const [h0, h1] = BLOCKS[hiWin.name], extra = ((hiWin.recent_w - hiWin.usual_w) * (h1 - h0) * 30) / 1000;
-    add({ id: 'window', thermostat: false, control: 'unknown', action: `Find out what runs for hours in the ${part(hiWin)} (walk through once and note what’s on).`,
+    add({ id: 'window', short: 'Find what runs in the afternoon', thermostat: false, control: 'unknown', action: `Find out what runs for hours in the ${part(hiWin)} (walk through once and note what’s on).`,
       why: `${cap(part(hiWin))}s lately average ${fmt(hiWin.recent_w)} W — above every earlier two weeks (usual ${fmt(hiWin.low_w)}–${fmt(hiWin.high_w)} W). The meter can’t say what it is.`,
       evidence: `Measured: hourly readings, latest 14 days vs your ${fmt(hiWin.rank_pct)}th-percentile history.`,
       savings: { kind: 'unknown', dollars: null, upTo: $(extra), method: `The extra above your usual is about ${fmt(extra)} kWh a month${$(extra) != null ? ` (≈ $${fmt($(extra), 2)})` : ''} — a measured ceiling, and only if the cause is something you don’t need.` },
@@ -2185,7 +2185,7 @@ export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   const n = r.night;
   if (n && n.mildNights >= 7) {
     const floor = n.alwaysOn, per10 = (10 / 1000) * 24 * 30;
-    if (floor > 220) add({ id: 'standby', thermostat: false, control: 'unknown', action: 'Look for things that stay on all night, then test switching them off for a week.',
+    if (floor > 220) add({ id: 'standby', short: 'Check what stays on overnight', thermostat: false, control: 'unknown', action: 'Look for things that stay on all night, then test switching them off for a week.',
       why: `On mild nights your home draws about ${fmt(floor)} W between 1 and 5 AM. Many apartments sit around 150–220 W, but part of yours may be things you need (fridge, router). Nothing removable has been identified yet.`,
       evidence: `Measured: 1–5 AM average on ${n.mildNights} mild nights.`,
       savings: { kind: 'unknown', dollars: null, method: `Not estimable until something removable is found. For scale: every 10 W switched off all day and night is ${fmt(per10, 1)} kWh a month${$(per10) != null ? ` (≈ $${fmt($(per10), 2)})` : ''} — arithmetic, not a prediction.` },
@@ -2198,7 +2198,7 @@ export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   const cs = coolingSlope(days, temps), th = p.thermostat, base = th?.mode === 'cool' ? th.setpoint : null;
   if (base != null && p.buildingMode !== 'heat_available') {
     const meterNote = metered === 'yes' ? '' : metered === 'no' ? ' Cooling isn’t on your meter, so this wouldn’t change your bill.' : ' It isn’t confirmed that the cooling equipment runs on your meter, so any saving may not show on your bill.';
-    if (metered !== 'no') add({ id: 'setpoint', thermostat: true, control: 'yes', action: `Optional test: hold ${base + 1}°F instead of ${base}°F for two weeks of warm weather, then go back if it isn’t comfortable.`,
+    if (metered !== 'no') add({ id: 'setpoint', short: 'Try one degree warmer on warm days', thermostat: true, control: 'yes', action: `Optional test: hold ${base + 1}°F instead of ${base}°F for two weeks of warm weather, then go back if it isn’t comfortable.`,
       why: `You keep the thermostat at ${base}°F on HOLD, day and night, by choice — that stays your baseline. One degree warmer is the smallest change that could matter.${cs ? ` In your readings, outdoor temperature explains only ${fmt(Math.max(0, cs.r2) * 100)}% of daily differences, so past days can’t say what one degree is worth.` : ''}${meterNote} ${base + 2}°F is a further option only if ${base + 1}°F feels fine.`,
       evidence: cs ? `Measured: ${cs.n} days of readings with outdoor temperatures; your confirmed setting (${base}°F HOLD, programming off).` : `Your confirmed setting (${base}°F HOLD, programming off).`,
       savings: { kind: 'unknown', dollars: null, method: 'Not estimated. The test measures it directly; in cool weather the cooling runs little, so the meter may not show a difference and the result will say “no clear difference”.' },
@@ -2300,78 +2300,136 @@ export function priceStructure(state) {
 
 export const EXP_STATUS = { running: 'Running', ended: 'Ended' };
 const DOW_IDX = (iso) => new Date(`${iso}T12:00:00Z`).getUTCDay();
-/** Sanitise experiments the household created. Unknown fields stay empty; nothing is invented. */
+// ---- time windows: a window is [from, until] in hours. until ≤ from means "through midnight into the next morning" (10 PM → 6 AM).
+export const isOvernight = (h) => Array.isArray(h) && h[1] < h[0];
+export const windowHours = (h) => (!h ? 24 : h[1] > h[0] ? h[1] - h[0] : 24 - h[0] + h[1]);
+const hr12 = (h) => (h === 0 || h === 24 ? '12 AM' : h === 12 ? '12 PM' : h < 12 ? `${h} AM` : `${h - 12} PM`);
+const DOWS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], DOWFULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+/** Plain-English window: "10 PM → 6 AM the next morning", "weekdays, 12 PM–5 PM", "Fri and Sat nights, 10 PM → 6 AM". */
+export function windowLabel(hours, days, { tonight = false } = {}) {
+  const over = isOvernight(hours);
+  const span = !hours ? 'the whole day' : over ? (tonight ? `${hr12(hours[0])} tonight → ${hr12(hours[1])} tomorrow` : `${hr12(hours[0])} → ${hr12(hours[1])} the next morning`) : `${hr12(hours[0])}–${hr12(hours[1])}`;
+  if (!days || days.length === 7) return span;
+  const key = [...days].sort().join(',');
+  if (over) {
+    const who = key === '1,2,3,4,5' ? 'weekday' : key === '0,6' ? 'weekend' : days.length === 1 ? DOWFULL[days[0]] : days.map((d) => DOWS[d]).join(' and ');
+    return `${who} nights, ${hr12(hours[0])} → ${hr12(hours[1])}`;
+  }
+  const who = key === '1,2,3,4,5' ? 'weekdays' : key === '0,6' ? 'weekends' : days.length === 1 ? `${DOWFULL[days[0]]}s` : days.map((d) => DOWS[d]).join(' and ');
+  return `${who}, ${span}`;
+}
+/** Which hours of the week a window covers, as slots (weekday × 24 + hour), counted from the weekday the window STARTS on. */
+function windowSlots(e) {
+  const [h0, h1] = e.hours || [0, 24], n = windowHours(e.hours), out = new Set();
+  for (const d of e.days || [0, 1, 2, 3, 4, 5, 6]) for (let k = 0; k < (e.hours ? n : 24); k++) out.add((d * 24 + (e.hours ? h0 : 0) + k) % 168);
+  return out;
+}
+/** Do two tests ever change the same hours (across midnight too), within overlapping date ranges? */
+export function windowsOverlap(a, b) {
+  if (a.start > (b.end || '9999') || b.start > (a.end || '9999')) return false;
+  const sa = windowSlots(a), sb = windowSlots(b);
+  for (const x of sa) if (sb.has(x)) return true;
+  return false;
+}
+export const PLAIN_RESULT = { reduced: 'Electricity use went down.', increased: 'Electricity use went up.', inconclusive: 'No clear difference.', collecting: 'We need more readings.', too_small: 'Too small for the meter to show.', confounded: 'Can’t tell — another change overlapped.', invalid: 'This test needs a valid time.' };
+
+/** Sanitise experiments the household created. A window that makes no sense is flagged invalid — never turned into a whole-day test. */
 export function cleanExperiments(list) {
-  return (Array.isArray(list) ? list : []).filter((e) => e && typeof e.id === 'string' && typeof e.title === 'string' && isIso(e.start)).slice(-40).map((e) => ({
-    id: e.id.slice(0, 40), title: e.title.slice(0, 160), start: e.start, end: isIso(e.end) && e.end >= e.start ? e.end : '',
-    hours: Array.isArray(e.hours) && e.hours.length === 2 && e.hours.every((h) => Number.isInteger(h) && h >= 0 && h <= 24) && e.hours[0] < e.hours[1] ? e.hours : null,
-    days: Array.isArray(e.days) && e.days.length && e.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ? [...new Set(e.days)].sort() : null,
-    watts: Number.isFinite(+e.watts) && +e.watts > 0 && +e.watts < 10000 ? +e.watts : null, hoursPerDay: Number.isFinite(+e.hoursPerDay) && +e.hoursPerDay > 0 && +e.hoursPerDay <= 24 ? +e.hoursPerDay : null,
-    cooling: e.cooling === true, exclude: (Array.isArray(e.exclude) ? e.exclude : []).filter(isIso).slice(0, 60), decision: ['keep', 'revert'].includes(e.decision) ? e.decision : null,
-    note: String(e.note || '').slice(0, 300), at: isIso(e.at) ? e.at : e.start,
-  })).sort((a, b) => (a.start < b.start ? -1 : 1));
+  return (Array.isArray(list) ? list : []).filter((e) => e && typeof e.id === 'string' && typeof e.title === 'string' && isIso(e.start)).slice(-40).map((e) => {
+    let hours = null, invalid = e.invalid === 'window' ? 'window' : undefined;
+    if (e.hours != null) {
+      const h = Array.isArray(e.hours) && e.hours.length === 2 ? e.hours.map((x) => (typeof x === 'number' ? x : NaN)) : null;
+      if (h && h.every((x) => Number.isInteger(x) && x >= 0 && x <= 24) && h[0] < 24 && h[0] !== h[1] && !(h[0] === 0 && h[1] === 24 && false)) hours = h[1] === 0 && h[0] > 0 ? [h[0], 24] : h;
+      else invalid = 'window';
+    }
+    return {
+      id: e.id.slice(0, 40), title: e.title.slice(0, 160), start: e.start, end: isIso(e.end) && e.end >= e.start ? e.end : '',
+      startedAt: /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(e.startedAt || '') ? e.startedAt : '', hours, ...(invalid ? { invalid } : {}),
+      days: Array.isArray(e.days) && e.days.length && e.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ? [...new Set(e.days)].sort() : null,
+      watts: Number.isFinite(+e.watts) && +e.watts > 0 && +e.watts < 10000 ? +e.watts : null, hoursPerDay: Number.isFinite(+e.hoursPerDay) && +e.hoursPerDay > 0 && +e.hoursPerDay <= 24 ? +e.hoursPerDay : null,
+      cooling: e.cooling === true, exclude: (Array.isArray(e.exclude) ? e.exclude : []).filter(isIso).slice(0, 60), decision: ['keep', 'revert'].includes(e.decision) ? e.decision : null,
+      note: String(e.note || '').slice(0, 300), at: isIso(e.at) ? e.at : e.start,
+    };
+  }).sort((a, b) => (a.start < b.start ? -1 : 1));
 }
 
 /**
- * Before/after comparison for one experiment:
- *  metric = kWh in the experiment's hours (or the whole day) on its days of the week, complete days only, minus days the household excluded;
- *  baseline = the same metric in the 8 weeks before the start; weather = a fitted temperature effect when the baseline shows one, else days
- *  matched within 4°F, else none (said plainly). Result: reduced / increased / inconclusive / too small to measure / not attributable / collecting.
+ * Before/after comparison for one test. A test is a window of hours (overnight windows run from the START date into the next morning) on
+ * chosen weekdays (the weekday the window starts on). One value per occurrence = the kWh in that window, counted only when EVERY hour has a
+ * reading — an hour that was not recorded is never filled in with zero. "Before" = the 8 weeks before the test began; "after" = occurrences
+ * starting at or after the moment the change was confirmed. Temperature adjusts the comparison only when the "before" days show a clear effect.
+ * Results: reduced / increased / inconclusive / too small / not attributable / collecting.
  */
 export function evaluateExperiment({ state, temps = {}, exp, now = Date.now() }) {
   const e = cleanExperiments([exp])[0];
-  if (!e) return { status: 'invalid', label: 'Not a valid experiment' };
-  const [h0, h1] = e.hours || [0, 24], hrs = h1 - h0, perWeek = e.days ? e.days.length : 7;
-  const all = hourlyByDay(state.usage, C.dailyTotals(state.usage).filter((d) => d.complete).map((d) => d.date))
-    .filter((d) => (!e.days || e.days.includes(DOW_IDX(d.date))) && !e.exclude.includes(d.date));
-  const val = (d) => sum(d.h.slice(h0, h1));
-  const lastDate = all.length ? all[all.length - 1].date : null;
+  if (!e) return { status: 'invalid', label: PLAIN_RESULT.invalid };
+  if (e.invalid) return { id: e.id, title: e.title, status: 'invalid', label: PLAIN_RESULT.invalid, detail: 'The time window for this test isn’t valid. Open the test and correct it.', caveats: [] };
+  const over = isOvernight(e.hours), [h0, h1] = e.hours || [0, 24], hrs = windowHours(e.hours), perWeek = e.days ? e.days.length : 7;
+  const unit = over ? 'night' : 'day', pad = (h) => String(h).padStart(2, '0');
+  const H = state.usage.hourly || {};
+  const hasDate = new Set(Object.keys(H).map((k) => k.slice(0, 10))), lastDate = [...hasDate].sort().pop() || null;
+  const wholeDay = new Map(C.dailyTotals(state.usage).filter((d) => d.complete).map((d) => [d.date, d.kwh]));
+  const startedKey = e.startedAt || `${e.start}T${pad(e.hours ? 0 : 0)}`;
   const end = e.end || lastDate || e.start;
-  const before = all.filter((d) => d.date < e.start && d.date >= isoAdd(e.start, -56)), after = all.filter((d) => d.date >= e.start && d.date <= end);
+  const occ = []; let incomplete = 0, partialStart = 0;
+  for (let d = isoAdd(e.start, -56); d <= end; d = isoAdd(d, 1)) {
+    if ((e.days && !e.days.includes(DOW_IDX(d))) || e.exclude.includes(d)) continue;
+    let value = null, seen = false;
+    if (!e.hours) { if (wholeDay.has(d)) value = wholeDay.get(d); else { if (d >= e.start && hasDate.has(d)) incomplete++; continue; } seen = true; }
+    else {
+      const keys = []; for (let k = 0; k < hrs; k++) { const hh = h0 + k; keys.push(hh < 24 ? `${d}T${pad(hh)}` : `${isoAdd(d, 1)}T${pad(hh - 24)}`); }
+      const present = keys.filter((k) => H[k] != null).length;
+      if (present === keys.length) { value = sum(keys.map((k) => H[k])); seen = true; } else { if (d >= e.start && (present > 0 || hasDate.has(d))) incomplete++; continue; }
+    }
+    if (value == null) continue;
+    const startKey = `${d}T${pad(e.hours ? h0 : 0)}`, beforeStart = d < e.start;
+    const t = Number.isFinite(temps[d]) ? (over && Number.isFinite(temps[isoAdd(d, 1)]) ? (temps[d] + temps[isoAdd(d, 1)]) / 2 : temps[d]) : null;
+    occ.push({ date: d, v: value, t, startKey, side: beforeStart ? 'before' : (e.hours ? startKey >= startedKey : (e.startedAt && +e.startedAt.slice(11) > 0 ? d > e.startedAt.slice(0, 10) : d >= e.start)) ? 'after' : 'partial' });
+  }
+  const before = occ.filter((o) => o.side === 'before'), after = occ.filter((o) => o.side === 'after');
+  partialStart = occ.filter((o) => o.side === 'partial').length;
   const needAfter = e.days ? Math.min(4, 2 * perWeek) : 7, needBefore = e.days ? Math.min(6, 3 * perWeek) : 14;
-  const out = { id: e.id, title: e.title, window: e.hours ? `${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}` : 'the whole day', days_after: after.length, days_before: before.length, need_after: needAfter, caveats: [] };
-  // Other experiments running at the same time make the result unattributable.
-  const overlapping = cleanExperiments(state.experiments).filter((o) => o.id !== e.id && o.start <= end && (!o.end || o.end >= e.start) && (!o.hours || !e.hours || (o.hours[0] < h1 && o.hours[1] > h0)));
-  if (before.length < needBefore) return { ...out, status: 'collecting', label: 'Not enough “before” days', detail: `Needs ${needBefore} comparable days in the 8 weeks before ${md(e.start)}; there are ${before.length}.` };
-  if (after.length < needAfter) return { ...out, status: 'collecting', label: 'Collecting', detail: `${after.length} of ${needAfter} comparable days so far${lastDate && lastDate < isoAdd(now ? new Date(now).toISOString().slice(0, 10) : e.start, -1) ? ` — import a newer Delmarva file (readings end ${md(lastDate)})` : ''}.` };
-  // Weather: fitted effect, matched days, or none.
-  const T = (d) => temps[d.date];
-  const bT = before.filter((d) => Number.isFinite(T(d))), aT = after.filter((d) => Number.isFinite(T(d)));
-  let adjust = (d) => 0, method = 'plain before/after average (no outdoor temperatures)';
+  const out = { id: e.id, title: e.title, window: windowLabel(e.hours, null), days_after: after.length, days_before: before.length, need_after: needAfter, unit, caveats: [] };
+  const val = (o) => o.v;
+  const overlapping = cleanExperiments(state.experiments).filter((o) => o.id !== e.id && !o.invalid && windowsOverlap(o, { ...e, end }));
+  if (before.length < needBefore) return { ...out, status: 'collecting', label: PLAIN_RESULT.collecting, detail: `Needs ${needBefore} comparable ${unit}s in the 8 weeks before ${md(e.start)}; there are ${before.length}.` };
+  if (after.length < needAfter) return { ...out, status: 'collecting', label: PLAIN_RESULT.collecting, detail: `${after.length} of ${needAfter} comparable ${unit}s so far${lastDate && lastDate < C.localParts(now).date ? ` — your newest reading is from ${md(lastDate)}. Import a newer Delmarva file after a few more ${unit}s.` : '.'}` };
+  // Weather: fitted effect, else none (said plainly).
+  const bT = before.filter((o) => o.t != null), aT = after.filter((o) => o.t != null);
+  let adjust = () => 0, method = 'plain before/after average (no outdoor temperatures)';
   if (bT.length >= 10 && aT.length === after.length) {
-    const xs = bT.map(T), ys = bT.map(val), mx = avg(xs), my = avg(ys), sxx = sum(xs.map((x) => (x - mx) ** 2));
+    const xs = bT.map((o) => o.t), ys = bT.map(val), mx = avg(xs), my = avg(ys), sxx = sum(xs.map((x) => (x - mx) ** 2));
     const b = sxx > 0 ? sum(xs.map((x, i) => (x - mx) * (ys[i] - my))) / sxx : 0, res = ys.map((y, i) => y - my - b * (xs[i] - mx));
     const se = sxx > 0 ? Math.sqrt(sum(res.map((r) => r * r)) / Math.max(1, xs.length - 2) / sxx) : Infinity;
-    const outside = aT.filter((d) => T(d) < Math.min(...xs) - 3 || T(d) > Math.max(...xs) + 3).length;
-    if (Math.abs(b) > 2 * se && outside <= after.length * 0.3) { adjust = (d) => b * (T(d) - mx); method = `before/after, adjusted for outdoor temperature (${fmt(b, 2)} kWh per °F in these hours, from ${bT.length} earlier days)`; }
+    const outside = aT.filter((o) => o.t < Math.min(...xs) - 3 || o.t > Math.max(...xs) + 3).length;
+    if (Math.abs(b) > 2 * se && outside <= after.length * 0.3) { adjust = (o) => b * (o.t - mx); method = `before/after, adjusted for outdoor temperature (${fmt(b, 2)} kWh per °F in these hours, from ${bT.length} earlier ${unit}s)`; }
     else if (Math.abs(b) > 2 * se) out.caveats.push('The weather during the test was outside the range of the comparison days, so the weather adjustment can’t be trusted; the result is marked uncertain.');
-    else method = `before/after average; outdoor temperature showed no clear effect on these hours (${bT.length} earlier days)`;
+    else method = `before/after average; outdoor temperature showed no clear effect on these hours (${bT.length} earlier ${unit}s)`;
   }
-  const rb = before.map((d) => val(d) - adjust(d)), ra = after.map((d) => val(d) - adjust(d));
-  const diff = avg(ra) - avg(rb), se = Math.sqrt(sd(rb) ** 2 / rb.length + sd(ra) ** 2 / ra.length), lo = diff - 1.96 * se, hi = diff + 1.96 * se;
-  const mde = 2.8 * se; // the smallest change these days could reliably show
-  const expected = e.watts && (e.hoursPerDay || hrs) ? (e.watts * Math.min(e.hoursPerDay || hrs, hrs)) / 1000 : null; // kWh a day, from your stated wattage and hours
+  const rb = before.map((o) => val(o) - adjust(o)), ra = after.map((o) => val(o) - adjust(o));
+  const diff = avg(ra) - avg(rb), se = Math.sqrt(sd(rb) ** 2 / rb.length + sd(ra) ** 2 / ra.length), lo = diff - 1.96 * se, hi = diff + 1.96 * se, mde = 2.8 * se;
+  const expected = e.watts && (e.hoursPerDay || hrs) ? (e.watts * Math.min(e.hoursPerDay || hrs, hrs)) / 1000 : null;
   const perMonth = (k) => (k * perWeek * 30) / 7;
   const rf = rateFor(state), $ = (k) => (rf.rate != null ? k * rf.rate : null);
   Object.assign(out, { diff_kwh: r2(diff), ci: [r2(lo), r2(hi)], mde_kwh: r2(mde), method, before_kwh: r2(avg(before.map(val))), after_kwh: r2(avg(after.map(val))), expected_kwh: expected != null ? r2(expected) : null });
-  if (out.caveats.length) return { ...out, status: 'inconclusive', label: 'Inconclusive', detail: out.caveats[0] };
-  if (overlapping.length) return { ...out, status: 'confounded', label: 'Can’t be attributed', detail: `“${overlapping[0].title}” ran at the same time${overlapping.length > 1 ? `, with ${overlapping.length - 1} other change(s)` : ''}, so a difference can’t be credited to this change alone.` };
-  const missing = e.end ? isoGap(e.start, e.end) + 1 - after.length - e.exclude.length : null;
-  if (missing != null && missing > 0 && e.days == null) out.caveats.push(`${missing} day(s) in the test period had incomplete readings and were left out.`);
-  if (e.exclude.length) out.caveats.push(`${e.exclude.length} day(s) you marked as unusual were left out.`);
+  if (incomplete) out.caveats.push(`${incomplete} ${unit}(s) had incomplete readings and were left out.`);
+  if (partialStart) out.caveats.push(`The ${unit} you started on was only partly covered, so it isn’t counted.`);
+  if (e.exclude.length) out.caveats.push(`${e.exclude.length} ${e.exclude.length === 1 ? 'day' : 'days'} you marked as unusual ${e.exclude.length === 1 ? 'was' : 'were'} left out.`);
+  if (out.caveats.some((c) => /outside the range/.test(c))) return { ...out, status: 'inconclusive', label: PLAIN_RESULT.inconclusive, detail: out.caveats.find((c) => /outside the range/.test(c)) };
+  if (overlapping.length) return { ...out, status: 'confounded', label: PLAIN_RESULT.confounded, detail: `“${overlapping[0].title}” changes some of the same hours${overlapping.length > 1 ? `, and so do ${overlapping.length - 1} other test(s)` : ''}, so a difference can’t be credited to this change alone.` };
   const money = (k) => { const v = $(perMonth(k)); return v != null ? `$${fmt(v, 2)}` : null; };
   if (expected != null && expected < mde) {
     const eng = perMonth(expected);
-    return { ...out, status: 'too_small', label: 'Too small for the meter to show', detail: `The change you described (${fmt(e.watts)} W for ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h a day ≈ ${fmt(expected, 2)} kWh a day) is smaller than the day-to-day swings in these hours (the meter could only show about ${fmt(mde, 2)} kWh a day or more). Hourly whole-home readings can’t confirm it.`,
-      engineering: { kwh_month: r1(eng), dollars: $(eng) != null ? r2($(eng)) : null, method: `Your stated ${fmt(e.watts)} W × ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h × ${fmt((perWeek * 30) / 7, 1)} days a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. An engineering estimate, not a measurement.` } };
+    return { ...out, status: 'too_small', label: PLAIN_RESULT.too_small, detail: `The change you described (${fmt(e.watts)} W for ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h ≈ ${fmt(expected, 2)} kWh a ${unit}) is smaller than the ${unit}-to-${unit} swings in these hours (the meter could only show about ${fmt(mde, 2)} kWh or more). Hourly whole-home readings can’t confirm it.`,
+      engineering: { kwh_month: r1(eng), dollars: $(eng) != null ? r2($(eng)) : null, method: `Your stated ${fmt(e.watts)} W × ${fmt(Math.min(e.hoursPerDay || hrs, hrs), 1)} h × ${fmt((perWeek * 30) / 7, 1)} ${unit}s a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. An engineering estimate, not a measurement.` } };
   }
   if (hi < 0) {
     const m = perMonth(-diff), mLo = perMonth(-hi), mHi = perMonth(-lo), longEnough = after.length >= (e.days ? 2 * perWeek : 14);
-    return { ...out, status: 'reduced', label: longEnough ? 'Measured reduction' : 'Early sign of a reduction', detail: `${fmt(-diff, 2)} kWh a day less in ${out.window} (95% range ${fmt(-hi, 2)}–${fmt(-lo, 2)}), over ${after.length} days vs ${before.length} before.${longEnough ? '' : ' Keep going: more days will firm this up.'}`,
-      monthly: { kwh: [r1(mLo), r1(mHi)], kwh_mid: r1(m), dollars: money(-hi) && money(-lo) ? [r2($(mLo)), r2($(mHi))] : null, method: `Measured kWh a day × ${fmt((perWeek * 30) / 7, 1)} days a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. Assumes the change continues and conditions stay similar.${e.cooling && state.profile.hvacMetered !== 'yes' ? ' Cooling may not be on your meter — unconfirmed — so the bill effect is uncertain.' : ''}` } };
+    return { ...out, status: 'reduced', label: PLAIN_RESULT.reduced, detail: `${fmt(-diff, 2)} kWh less each ${unit} in ${windowLabel(e.hours, null)} (range ${fmt(-hi, 2)}–${fmt(-lo, 2)}), over ${after.length} ${unit}s vs ${before.length} before.${longEnough ? '' : ' Keep going: more ${unit}s will firm this up.'.replace('${unit}', unit)}`,
+      monthly: { kwh: [r1(mLo), r1(mHi)], kwh_mid: r1(m), dollars: money(-hi) && money(-lo) ? [r2($(mLo)), r2($(mHi))] : null, method: `Measured kWh per ${unit} × ${fmt((perWeek * 30) / 7, 1)} ${unit}s a month${rf.rate != null ? ` × ${fmt(rf.rate * 100, 2)}¢ (${rf.source})` : ''}. Assumes the change continues and conditions stay similar.${e.cooling && state.profile.hvacMetered !== 'yes' ? ' Cooling may not be on your meter — unconfirmed — so the bill effect is uncertain.' : ''}` }, early: !longEnough };
   }
-  if (lo > 0) return { ...out, status: 'increased', label: 'Use went up', detail: `${fmt(diff, 2)} kWh a day more in ${out.window} (95% range ${fmt(lo, 2)}–${fmt(hi, 2)}). The change didn’t help, or something else changed at the same time.` };
-  return { ...out, status: 'inconclusive', label: 'No clear difference', detail: `The difference (${diff >= 0 ? '+' : ''}${fmt(diff, 2)} kWh a day, 95% range ${fmt(lo, 2)} to ${fmt(hi, 2)}) is within normal day-to-day variation. The meter could only show about ${fmt(mde, 2)} kWh a day or more.${expected != null ? ` Your described change is about ${fmt(expected, 2)} kWh a day.` : ''}` };
+  if (lo > 0) return { ...out, status: 'increased', label: PLAIN_RESULT.increased, detail: `${fmt(diff, 2)} kWh more each ${unit} in ${windowLabel(e.hours, null)} (range ${fmt(lo, 2)}–${fmt(hi, 2)}). The change didn’t help, or something else changed at the same time.` };
+  return { ...out, status: 'inconclusive', label: PLAIN_RESULT.inconclusive, detail: `The difference (${diff >= 0 ? '+' : ''}${fmt(diff, 2)} kWh a ${unit}) is within normal ${unit}-to-${unit} variation; the meter could only show about ${fmt(mde, 2)} kWh or more.${expected != null ? ` Your described change is about ${fmt(expected, 2)} kWh a ${unit}.` : ''}` };
 }
 
 /** Why the latest billing period differs from the earlier ones — only from the reported figures and the readings for the same days. */

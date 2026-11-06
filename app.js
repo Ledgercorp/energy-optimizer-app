@@ -152,7 +152,7 @@ function scatterChart(pts, curve) {
 // ---------- shared bits ----------
 
 const ICON = {
-  today: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M21.5 12h-2M4.5 12h-2M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4M18.7 18.7l-1.4-1.4M6.7 6.7 5.3 5.3"/>',
+  today: '<path d="M4 11.2 12 4.5l8 6.7V20h-5.2v-5.6H9.2V20H4z"/>',
   insights: '<path d="M5 20v-7M12 20V5M19 20v-11M3 20.5h18"/>',
   bills: '<path d="M6 2.8h12v18.4l-2-1.4-2 1.4-2-1.4-2 1.4-2-1.4-2 1.4z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
   savings: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.9-1.6-1.4-2.8-1.4-1.6 0-2.8.8-2.8 2.1 0 2.8 5.8 1.5 5.8 4.3 0 1.3-1.3 2.2-3 2.2-1.3 0-2.5-.6-3-1.6M12 6v1.8M12 16.4V18"/>',
@@ -163,8 +163,9 @@ const ic = {
   alert: '<svg class="ic-s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.2"/></svg>',
   unplug: '<svg class="ic-s" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3v4M16 3v4M6 7h12v4a6 6 0 0 1-12 0zM12 17v4"/><path d="m3 3 18 18"/></svg>',
 };
-const TABS = [['today', 'Today'], ['bills', 'Bills'], ['savings', 'Savings'], ['insights', 'Insights'], ['settings', 'Settings']];
+const TABS = [['today', 'Home'], ['bills', 'Bills'], ['savings', 'Savings']];
 const pagehead = (h, eyebrow = '') => `<header class="pagehead"><div>${eyebrow ? `<p class="eyebrow">${eyebrow}</p>` : ''}<h1>${h}</h1></div></header>`;
+const GEAR = '<a class="gear" href="#settings" aria-label="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M21.2 12h-2.6M5.4 12H2.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3 5.5 5.5"/></svg></a>';
 const back = (href, label) => `<a class="back" href="#${href}">‹ ${label}</a>`;
 const disclosure = (id, summary, body, open = false) => `<details class="disclosure" data-id="${id}" ${open || UI.open?.[id] ? 'open' : ''}><summary>${summary}</summary><div class="disc-body">${body}</div></details>`;
 const importButton = (label = 'Import Delmarva file (usage or billing .zip)') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".zip,.csv,.xml,application/zip,text/csv,text/xml,application/xml"></label>`;
@@ -268,23 +269,55 @@ function progressCard() {
   return `<a class="card ${c[0]}" href="#savings"><p class="card-label"><i class="dot"></i>Savings</p><h2>${esc(c[1])}</h2><p>${esc(c[2])}</p>${stale}</a>`;
 }
 
+// ---------- v21: Home (three jobs: my bill · is my use normal · what could I try) ----------
+const PLAIN_USE = { typical: 'Your electricity use is around your usual level.', return_to_typical: 'Your electricity use is back around your usual level.', unusually_high: 'Your electricity use is higher than usual lately.', unusually_low: 'Your electricity use is lower than usual lately.', insufficient: 'There isn’t enough history yet to say what’s usual for you.' };
+const agoText = (iso) => { const n = Math.round((Date.parse(`${todayIso()}T12:00:00Z`) - Date.parse(`${iso}T12:00:00Z`)) / 864e5); return n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`; };
+function homeSimple(st) {
+  const r = report(), b = r.baseline, bv = A.billView({ state: S, temps: allTemps() }), sp = planNow(), fc = bv.forecast, proj = bv.projection, last = usageDays().at(-1)?.date;
+  const lastBill = bv.statements[bv.statements.length - 1];
+  const close = fc?.available && proj && Math.abs(fc.mid - proj.amount) <= (fc.backtest.summary[fc.method]?.mae ?? 0);
+  const bill = proj ? `<p class="eyebrow-s">Your bill</p><p class="bigbill">${usd(proj.amount)}</p><p class="lead">Delmarva’s estimate for the bill ending ${esc(shortDate(proj.periodEnd))}.</p>${fc?.available ? `<p class="fine">Our own estimate: about ${usd(fc.mid)}${close ? ' — close to theirs.' : '.'}</p>` : ''}`
+    : fc?.available ? `<p class="eyebrow-s">Your bill</p><p class="bigbill">about ${usd(fc.mid)}</p><p class="lead">Our estimate for the bill ending ${esc(shortDate(fc.period.end))} — not from Delmarva.</p>`
+      : lastBill ? `<p class="eyebrow-s">Your bill</p><p class="bigbill">${usd(lastBill.amount)}</p><p class="lead">Your last bill, ending ${esc(shortDate(lastBill.end))}.</p>`
+        : `<p class="eyebrow-s">Your bill</p><p class="lead">We can’t show a bill yet. Add what Delmarva shows on the Bills page.</p>`;
+  const use = `<p class="eyebrow-s">Your use</p><p class="lead">${esc(b ? PLAIN_USE[b.status] : 'Your readings are loaded.')}</p><p class="fine">Readings through ${esc(shortDate(last))} (${agoText(last)}).</p>`;
+  const running = (S.experiments || []).filter((e) => !e.end), top = sp.items[0];
+  let act;
+  if (running.length) { const e = running[0], res = expEval(e); act = `<p class="eyebrow-s">Your test</p><p class="lead">Testing: ${esc(e.title)}</p><p class="fine">${esc(res.label)}</p><a class="more-link" href="#savings">See your test ›</a>`; }
+  else if (top) act = `<p class="eyebrow-s">Something to try</p><p class="lead">${esc(top.short || top.action)}</p><p class="fine">${top.savings.dollars ? esc(savingLine(top)) : 'We can’t say yet how much it would save.'}</p><button class="btn primary" data-act="try-open" data-src="${esc(top.id)}">Try it</button>`;
+  else act = `<p class="eyebrow-s">Something to try</p><p class="lead">Nothing is clearly worth changing right now.</p><a class="more-link" href="#savings">Savings ›</a>`;
+  const pending = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id)
+    ? `<section class="card notice"><p><b>An update is waiting from your Mac.</b> It adds your confirmed settings${householdUpdate.projection ? ' and a Delmarva projection' : ''}.</p><button class="btn secondary" data-act="household-review">Review</button></section>` : '';
+  const sched = (st.kind === 'program' || st.kind === 'update') ? '<p class="fine center">Your thermostat schedule isn’t programmed yet. <a href="#thermostat">Thermostat</a></p>' : '';
+  return `${pagehead('Home', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}${pending}
+    <section class="card home"><div class="q">${bill}<a class="more-link" href="#bills">See why ›</a></div></section>
+    <section class="card home"><div class="q">${use}<a class="more-link" href="#insights">View usage details ›</a></div></section>
+    <section class="card home"><div class="q">${act}</div></section>${sched}
+    <nav class="quiet-links" aria-label="More"><a href="#thermostat">Thermostat</a><a href="#weather">Weather</a><a href="#insights">Usage details</a></nav>`;
+}
 function viewToday() {
-  const rec = recNow();
-  const st = A.todayStatus(S, rec);
+  const rec = recNow(), st = A.todayStatus(S, rec);
+  if (usageDays().length) return homeSimple(st);
   const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
-  const main = [hh, usageDays().length ? billFirstCard() : '', hero(st, rec), usageDays().length ? '' : learnedToday(), zonesCard(), programCard(st, rec)];
+  const main = [hh, hero(st, rec), learnedToday(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
-    main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
+    main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="season-dismiss">Not yet</button></div></section>`);
   }
-  const side = [];
-  const ops = opsItems()[0];
+  const ops = opsItems()[0], side = [];
   if (ops && st.kind !== 'setup') side.push(`<a class="card ${ops.tone === 'warn' ? 'warn' : ''}" href="#insights"><p class="card-label"><i class="dot"></i>Heads-up</p><h2>${esc(ops.title)}</h2><p>${esc(ops.detail)}</p></a>`);
   side.push(weatherCard(rec));
   if (st.kind !== 'setup') side.push(progressCard());
   if (st.kind === 'ok') side.push(`<a class="card" href="#schedule"><p class="card-label">Thermostat schedule</p><h2>Programmed ${esc(shortDate(st.programmedOn))}</h2><p>See or print the weekly schedule.</p></a>`);
   if (IOS && !STANDALONE) side.push('<p class="fine center">Install: tap Share → Add to Home Screen.</p>');
-  return `${pagehead('Today', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}<div class="today"><div class="stack">${main.join('')}</div><div class="stack">${side.join('')}</div></div>`;
+  return `${pagehead('Home', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}<div class="today"><div class="stack">${main.join('')}</div><div class="stack">${side.join('')}</div></div>`;
+}
+function viewThermostat() {
+  const rec = recNow(), st = A.todayStatus(S, rec);
+  const hint = A.seasonHint(S.profile, rec.outlook);
+  const season = hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)
+    ? `<section class="card warn"><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="season-dismiss">Not yet</button></div></section>` : '';
+  return `${back('today', 'Home')}${pagehead('Thermostat', 'The app never changes it — you do')}${hero(st, rec)}${programCard(st, rec)}${season}${zonesCard()}${st.kind === 'ok' ? `<a class="card" href="#schedule"><p class="card-label">Thermostat schedule</p><h2>Programmed ${esc(shortDate(st.programmedOn))}</h2><p>See or print the weekly schedule.</p></a>` : ''}<p class="fine center"><a href="#settings">Edit what the thermostat shows in Settings</a></p>`;
 }
 
 function viewSchedule() {
@@ -483,7 +516,7 @@ function zonesGroup() {
 }
 function viewInvestigate() {
   const inv = invNow();
-  const head = `${back('insights', 'Insights')}${pagehead('Investigation', inv?.title ? esc(inv.title) : '')}`;
+  const head = `${back('insights', 'Your electricity use')}${pagehead('Investigation', inv?.title ? esc(inv.title) : '')}`;
   if (!inv) return `${head}<section class="card"><p>Import your Delmarva file to start.</p>${importButton()}</section>`;
   if (!inv.hypotheses?.length) return `${head}<section class="card"><h2>${esc(inv.title)}</h2><p>${esc(inv.headline)}</p></section>`;
   const reask = UI.reask && A.QUESTIONS[UI.reask] ? { id: UI.reask, text: A.QUESTIONS[UI.reask].text({ since: inv.since, day: inv.tests?.day, part: inv.tests?.part, bigDay: inv.tests?.biggest_day?.date }), why: A.QUESTIONS[UI.reask].why, options: A.QUESTIONS[UI.reask].options } : null;
@@ -642,10 +675,7 @@ function accuracyCard(bv) {
 
 let stmtDraft = null; // { fields, found, notFound, name, editingId? } from a PDF or an existing statement, shown for review before saving
 const STMT_FIELDS = [['supply', 'Supply charges ($)'], ['delivery', 'Delivery charges ($)'], ['fixed', 'Customer / fixed charge ($)'], ['taxes', 'Taxes and fees ($)'], ['credits', 'Credits ($, as a positive number)'], ['adjustments', 'Adjustments ($, minus for a reduction)'], ['priorBalance', 'Previous balance ($)'], ['payments', 'Payments ($)'], ['totalDue', 'Total amount due ($)']];
-function viewBills() {
-  const head = pagehead('Bills', 'Statements, projections and estimates — kept apart');
-  if (!usageDays().length) return `${head}<section class="card"><p>Import your Delmarva file to see your electricity month by month.</p>${importButton()}</section>`;
-  const bv = A.billView({ state: S, temps: allTemps() });
+function billsDetail(bv) {
   const d = stmtDraft?.fields || {}, v = (k) => (d[k] == null || d[k] === '' ? '' : esc(String(d[k]))), flag = (k) => (stmtDraft && !stmtDraft.editingId ? (stmtDraft.found.includes(k) ? ' <small class="found">read from the PDF — check it</small>' : ' <small>not found in the PDF</small>') : '');
   const monthRows = bv.months.map((m) => `<tr><td>${esc(new Date(`${m.month}-15T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }))}${m.partial ? ` <small>(${m.days} of ${m.daysInMonth} days)</small>` : ''}</td><td class="t">${num(m.kwh)}</td><td class="t">${num(m.kwh_per_day, 1)}</td><td class="t">${m.interval_cost != null ? money(m.interval_cost) : '—'}</td></tr>`).join('');
   const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(statement PDF)</small>' : x.source === 'greenbutton' ? ' <small>(Delmarva billing data)</small>' : ' <small>(entered)</small>'}${x.statementDate ? ` <small>billed ${esc(shortDate(x.statementDate))}</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td></tr>
@@ -653,8 +683,7 @@ function viewBills() {
   const drivers = bv.compare ? `<section class="card"><p class="card-label">Why the last bill changed</p><p>${money(bv.compare.prev.amount)} → ${money(bv.compare.cur.amount)} (${bv.compare.total >= 0 ? '+' : '−'}${money(Math.abs(bv.compare.total))})</p><ul class="bullets">${bv.compare.drivers.map((x) => `<li>${esc(x.label)}${x.amount != null ? `: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}` : ''} <small>(${x.status === 'confirmed' ? 'from your statements' : x.status === 'possible' ? 'possible, not measured' : x.status === 'unknown' ? 'can’t compare' : 'not explained by the figures entered'})</small></li>`).join('')}</ul>${bv.compare.typical_cost_per_day != null ? `<p class="fine">Your earlier statements cost about ${money(bv.compare.typical_cost_per_day)} a day (median).</p>` : ''}</section>` : '';
   const proj = bv.projection;
   const review = pendingBilling.length ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Needs your review</p>${pendingBilling.map((r, i) => `<p><b>${esc(shortDate(r.incoming.start))}–${esc(shortDate(r.incoming.end))}</b>: the new export says ${money(r.incoming.amount)}, ${num(r.incoming.kwh)} kWh; saved: ${esc(shortDate(r.existing.start || r.existing.end))}–${esc(shortDate(r.existing.end))} ${money(r.existing.amount)}${r.existing.kwh ? `, ${num(r.existing.kwh)} kWh` : ''} (${r.existing.source === 'greenbutton' ? 'earlier billing export' : r.existing.source === 'pdf' ? 'statement PDF' : 'entered by you'}). ${r.kind === 'changed' ? 'Possibly a corrected bill.' : 'The dates overlap.'}</p><div class="row2"><button class="btn primary" data-act="billing-take" data-i="${i}">Use the new figures</button><button class="btn secondary" data-act="billing-keep" data-i="${i}">Keep the saved one</button></div>`).join('')}</section>` : '';
-  return `${head}${review}
-    ${periodCard(bv)}
+  return `${review}
     ${drivers}
     <h2 class="section-title">Your statements</h2><section class="card">
       ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Service period</th><th class="t">Charges</th><th class="t">Days</th><th class="t">kWh</th><th class="t">kWh/day</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements yet. Add one below — from the PDF on your Mac, or by typing a few numbers.</p>'}
@@ -681,6 +710,38 @@ function viewBills() {
       <p class="fine">Only months with readings are listed; days without readings are left out, not counted as zero. Calendar months aren’t billing periods, and the per-hour costs are not a bill.</p></section>
     <h2 class="section-title">What’s missing</h2><section class="card"><ul class="bullets">${bv.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></section>`;
 }
+// ---------- v21: Bills (the answer first; corrections and evidence behind “Details”) ----------
+function viewBills() {
+  if (!usageDays().length) return `${pagehead('Bills')}<section class="card"><p>Import your Delmarva file to see your bills here.</p>${importButton()}</section>`;
+  const bv = A.billView({ state: S, temps: allTemps() }), proj = bv.projection, fc = bv.forecast, list = bv.statements.filter((x) => x.amount != null), out = [pagehead('Bills')];
+  const normal = bv.normal;
+  if (pendingBilling.length) out.push(`<section class="card notice"><p><b>${pendingBilling.length} bill${pendingBilling.length === 1 ? '' : 's'} need${pendingBilling.length === 1 ? 's' : ''} your review.</b> An import had different figures or overlapping dates. Nothing was changed.</p><p class="fine">Open “Details and corrections” below.</p></section>`);
+  // 1 · the current bill
+  const close = fc?.available && proj && Math.abs(fc.mid - proj.amount) <= (fc.backtest.summary[fc.method]?.mae ?? 0);
+  if (proj) {
+    out.push(`<section class="card home"><div class="q"><p class="eyebrow-s">Delmarva’s estimate</p><p class="bigbill">${usd(proj.amount)}</p>
+      <p class="lead">For ${esc(shortDate(proj.periodStart || fc?.period?.start || proj.periodEnd))}–${esc(shortDate(proj.periodEnd))}${fc?.available ? ` (${fc.days} days)` : ''}. Not a final bill.</p>
+      ${normal?.known ? `<p>${normal.within ? `That’s normal for you — most of your bills fall between ${usd(normal.range[0])} and ${usd(normal.range[1])}.` : `That’s outside your usual ${usd(normal.range[0])}–${usd(normal.range[1])}.`}</p>` : ''}
+      ${fc?.available ? `<p class="fine">Our own estimate: about ${usd(fc.mid)}${close ? ' — close to Delmarva’s.' : '.'}</p>` : ''}
+      <details class="more"><summary>How we estimate, and what’s still unknown</summary>${bv.gap ? `<ul class="bullets">${bv.gap.lines.map((l) => `<li>${esc(l.text)}</li>`).join('')}</ul>` : ''}${fc?.available ? `<p class="fine">${esc(fc.method_text)} ${esc(`Readings run to ${shortDate(fc.readingsEnd)} (${agoText(fc.readingsEnd)}): ${fc.measured} of ${fc.days} days are measured; the rest is forecast.`)}</p>` : ''}${proj.soFar != null ? `<p class="fine">Delmarva says about ${usd(proj.soFar)} has built up so far. The rest (about ${usd(proj.amount - proj.soFar)}) is part of the estimate, not money owed now.</p>` : ''}<p class="fine">You entered this from your Delmarva account; the app can’t see updates there. Delmarva’s own update time isn’t known.</p></details></div></section>`);
+  } else if (fc?.available) {
+    out.push(`<section class="card home"><div class="q"><p class="eyebrow-s">Our estimate</p><p class="bigbill">about ${usd(fc.mid)}</p><p class="lead">For ${esc(shortDate(fc.period.start))}–${esc(shortDate(fc.period.end))}. This is our own estimate, not Delmarva’s.</p><details class="more"><summary>How we estimate</summary><p class="fine">${esc(fc.method_text)}</p></details></div></section>`);
+  } else out.push(`<section class="card home"><div class="q"><p class="lead">No estimate for the current bill yet.</p><p class="fine">Add what your Delmarva account shows under “Details and corrections”.</p></div></section>`);
+  // 2 · why the last bill was cheaper (and this month)
+  const c = bv.compare;
+  if (c && c.total < 0) {
+    const d = (id) => c.drivers.find((x) => x.id === id && x.amount != null && Math.abs(x.amount) >= 1);
+    const parts = [d('usage') ? `you used ${d('usage').amount < 0 ? 'less' : 'more'} electricity each day (${num(c.cur.kwh_per_day, 1)} vs ${num(c.prev.kwh_per_day, 1)} kWh)` : '', d('days') ? `it covered ${c.cur.billed_days} days instead of ${c.prev.billed_days}` : '', (d('avgprice') || d('price')) ? `the average price per kWh was a little ${(d('avgprice') || d('price')).amount < 0 ? 'lower' : 'higher'}` : ''].filter(Boolean);
+    const thisMonth = proj && fc?.available && fc.measured >= 3 ? ` This month you’re back to about ${num(fc.measuredKwh / fc.measured, 1)} kWh a day${normal?.known && normal.within ? ', so the bill is back in your usual range' : ''}.` : '';
+    out.push(`<section class="card"><h2>Why was ${esc(shortDate(c.cur.end))}’s bill cheaper?</h2><p>The ${esc(shortDate(c.cur.start))}–${esc(shortDate(c.cur.end))} bill (${usd(c.cur.amount)}) was ${usd(Math.abs(c.total))} lower than the one before. ${parts.length ? `${parts.map((p, i) => (i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p)).join('; ')}.` : ''}${thisMonth}</p>
+      <details class="more"><summary>See the numbers</summary><ul class="bullets">${c.drivers.filter((x) => x.amount != null).map((x) => `<li>${esc(x.label)}: ${x.amount >= 0 ? '+' : '−'}${usd(Math.abs(x.amount))}${x.status === 'unexplained' ? ' (not itemised by Delmarva)' : ''}</li>`).join('')}</ul>${bv.lines.filter((l) => /Your readings agree|was the lowest/.test(l.text)).map((l) => `<p class="fine">${esc(l.text)}</p>`).join('')}<p class="fine">Part of the price difference includes fixed charges and taxes Delmarva doesn’t break out, so the app doesn’t say which.</p></details></section>`);
+  }
+  // 3 · past bills, compact
+  if (list.length) out.push(`<section class="card"><h2>Your bills</h2><ul class="rows">${list.slice().reverse().map((x) => `<li><span>${esc(shortDate(x.start || x.end))}–${esc(shortDate(x.end))}<small>${x.billed_days ?? ''} days${x.kwh_per_day != null ? ` · ${num(x.kwh_per_day, 1)} kWh a day` : ''}</small></span><b>${usd(x.amount)}</b></li>`).join('')}</ul></section>`);
+  out.push(`<details class="more card-more" ${pendingBilling.length || stmtDraft || moreOpen.bills ? 'open' : ''}><summary>Details and corrections</summary>${billsDetail(bv)}</details>`);
+  return out.join('');
+}
+
 
 
 function actsList() {
@@ -702,100 +763,105 @@ function savingLine(o) {
 }
 const EFFORT = { none: 'No effort', low: 'Low effort', medium: 'Some effort', high: 'High effort' }, COMFORT = { none: 'No comfort change', slight: 'Slightly warmer/cooler', noticeable: 'Noticeable comfort change' };
 /** How much am I using · what will the bill be · why higher or lower · what could I save. Every number says where it comes from. */
-function billFirstCard() {
-  const r = report(), b = r.baseline, bv = A.billView({ state: S, temps: allTemps() }), sp = planNow();
-  const last = usageDays().at(-1)?.date;
-  const q = (title, body) => `<div class="q"><p class="card-label">${title}</p>${body}</div>`;
-  const use = b && b.status !== 'insufficient'
-    ? `<h2>${num(b.recent.kwh, 1)} kWh a day <span class="kind-chip">${esc(b.label)}</span></h2><p class="fine">Last 14 days to ${esc(shortDate(last))}. Your usual: ${num(b.range.low, 1)}–${num(b.range.high, 1)} kWh a day.${bv.thirty ? ` Latest 30 days: ${num(bv.thirty.latest.kwh)} kWh.` : ''} Measured.</p>`
-    : `<h2>${num(r.perDay, 1)} kWh a day</h2><p class="fine">${r.n} day${r.n === 1 ? '' : 's'} of readings — about 10 weeks are needed to know what’s normal for you.</p>`;
-  const lines = [];
-  const fc = bv.forecast, proj = bv.projection, last1 = bv.statements[bv.statements.length - 1];
-  if (proj) {
-    lines.push(`<h2>${usd(proj.amount)} <span class="kind-chip">Delmarva projection</span></h2><p class="fine">For ${esc(shortDate(proj.periodStart || fc?.period?.start || proj.periodEnd))}–${esc(shortDate(proj.periodEnd))}. Projected, not final; entered by you from your Delmarva account${proj.shownOn ? ` (seen ${esc(shortDate(proj.shownOn))})` : ''}.${proj.soFar != null ? ` Estimated charges so far: ${usd(proj.soFar)}.` : ''}</p>`);
-    if (fc?.available) lines.push(`<p>Our own estimate: <b>${fc.pointOk ? `about ${usd(fc.mid)}` : `${usd(fc.low)}–${usd(fc.high)}`}</b> <span class="kind-chip">Estimate</span> <small>${fc.measured} of ${fc.days} days measured, to ${esc(shortDate(fc.readingsEnd))}; ${usd(Math.abs(bv.gap?.diff ?? fc.mid - proj.amount))} ${fc.mid >= proj.amount ? 'above' : 'below'} Delmarva — ${bv.gap && Math.abs(bv.gap.diff) <= (fc.backtest.summary[fc.method]?.mae ?? 0) ? 'within our usual error' : 'see Bills'}.</small></p>`);
-    if (bv.normal?.known) lines.push(`<p><b>${bv.normal.within ? 'Normal for you.' : 'Outside your usual range.'}</b> ${bv.normal.within ? `Within ${usd(bv.normal.range[0])}–${usd(bv.normal.range[1])}, where ${bv.normal.n} of your ${bv.normal.of} bills fell.` : ''}${bv.normal.exceptions.length ? ` Only ${bv.normal.exceptions.map((e) => `the ${usd(e.amount)} bill ending ${esc(shortDate(e.end))}`).join(' and ')} ${bv.normal.exceptions.length > 1 ? 'were' : 'was'} unusual.` : ''}</p>`);
-    if (fc?.available && last1?.kwh_per_day != null && fc.measured >= 3) {
-      const measKd = fc.measuredKwh / fc.measured, du = (measKd / last1.kwh_per_day - 1) * 100, dd = proj.amount - last1.amount;
-      lines.push(`<p class="fine"><b>Use:</b> ${num(measKd, 1)} kWh a day so far this period vs ${num(last1.kwh_per_day, 1)} in the last bill (${du >= 0 ? '+' : '−'}${num(Math.abs(du))}%, measured).<br><b>Dollars:</b> ${usd(proj.amount)} projected vs ${usd(last1.amount)} billed (${dd >= 0 ? '+' : '−'}${usd(Math.abs(dd))}, ${dd >= 0 ? '+' : '−'}${num(Math.abs(dd / last1.amount) * 100)}%). Billed days: ${fc.days} vs ${last1.billed_days ?? '?'}.</p>`);
-    }
-  } else {
-  if (bv.projection) lines.push(`<p><b>${usd(bv.projection.amount)}</b> <span class="kind-chip">Delmarva projection · entered by you</span></p>`);
-  if (bv.estimate) lines.push(`<p><b>${usd(bv.estimate.low)}–${usd(bv.estimate.high)}</b> <span class="kind-chip">App estimate</span></p><p class="fine">${esc(bv.estimate.method)}</p>`);
-  if (!bv.projection && !bv.estimate) lines.push(`<p>${bv.usual ? `You told us it’s usually <b>${usd(bv.usual.low)}–${usd(bv.usual.high)}</b>. ` : ''}The app can’t estimate this bill yet: it needs one Delmarva statement (dates, kWh and charges).</p>${bv.thirty?.latest.cost != null ? `<p class="fine">The file’s per-hour costs for the latest 30 days add up to ${usd(bv.thirty.latest.cost)} — not a bill: no fixed charges, taxes or credits.</p>` : ''}`);
-  }
-  let why;
-  if (bv.compare) {
-    const conf = bv.compare.drivers.filter((x) => x.status === 'confirmed' && x.amount != null).sort((x, y) => Math.abs(y.amount) - Math.abs(x.amount)).slice(0, 2);
-    const poss = bv.compare.drivers.filter((x) => x.status === 'possible');
-    why = `<p>Last statement ${bv.compare.total >= 0 ? 'up' : 'down'} ${usd(Math.abs(bv.compare.total))} from the one before.</p><ul class="bullets">${conf.map((x) => `<li>${esc(x.label)}: ${x.amount >= 0 ? '+' : '−'}${usd(Math.abs(x.amount))} <small>(from your statements)</small></li>`).join('')}${poss.map((x) => `<li>${esc(x.label)} <small>(possible, not measured)</small></li>`).join('')}</ul>`;
-  } else if (b?.status === 'return_to_typical' && b.low_stretch) {
-    why = `<p>Your use dipped to ${num(b.low_stretch.kwh, 1)} kWh a day from ${esc(shortDate(b.low_stretch.from))} to ${esc(shortDate(b.low_stretch.to))}, then came back to normal. A bill covering mostly that stretch would be lower and the next one back to usual — <i>likely, but unconfirmed</i> until you add statements with their dates.</p><p class="fine">Your price per kWh in the file was flat (same every hour), so this isn’t a rate effect.</p>`;
-  } else why = `<p>${b && b.status !== 'insufficient' ? esc(b.headline) : 'More readings and a statement are needed to explain bill changes.'}</p>`;
-  const top = sp.items.slice(0, 2);
-  const save = top.length ? `${sp.normal ? '<p class="fine">Your use is normal for your home — normal isn’t the same as efficient.</p>' : ''}<ul class="opps">${top.slice(0, 1).map((o) => `<li><b>${esc(o.action)}</b><small>${esc(savingLine(o))} · ${esc(EFFORT[o.effort])}${o.experiment ? ' · can be tested' : ''}</small></li>`).join('')}</ul><a class="btn plain" href="#savings">Test a change ›</a>`
-    : `<p>No change is clearly worth it from your readings right now.</p><a class="btn plain" href="#savings">What was considered ›</a>`;
-  const running = (S.experiments || []).filter((e) => !e.end);
-  const th = S.profile.thermostat, sp0 = sp.items.find((o) => o.id === 'setpoint');
-  const thermoLine = th ? q('Thermostat', `<p><b>Actual: ${th.setpoint}°F HOLD, programming ${th.programming === 'off' ? 'OFF' : 'ON'}</b> <small>(confirmed by you)</small></p>${sp0 && !running.some((e) => /°F instead of/.test(e.title)) ? `<p class="fine">Optional test: try ${th.setpoint + 1}°F for two warm weeks — only if you want to; the app won’t change it. <a href="#savings">Details</a></p>` : ''}`) : '';
-  const testing = running.length ? q('Your test', running.map((e) => { const r = expEval(e); return `<p><b>${esc(e.title)}</b> — ${esc(r.label)}. <small>${esc(r.detail || '')}</small></p>`; }).join('') + '<a class="btn plain" href="#savings">See the test ›</a>') : '';
-  const hasProj = !!bv.projection;
-  return `<section class="card billfirst">${hasProj ? `${q('What’s my projected bill?', lines.join(''))}<a class="btn plain" href="#bills">Bills, estimate and how accurate it is ›</a>${q('How much am I using?', use)}` : `${q('How much are you using?', use)}${q('What will the bill be?', lines.join(''))}<a class="btn plain" href="#bills">Bills and statements ›</a>`}
-    ${q(hasProj ? 'Why was the last bill cheaper?' : 'Why higher or lower?', why)}${q(hasProj ? 'What could I do next?' : 'What could you save?', save)}${testing}${thermoLine}</section>`;
-}
-
 // ---------- Savings tab ----------
-let expDraft = null; // prefilled "try a change" form
-const HOURS = Array.from({ length: 25 }, (_, h) => [h, h === 24 ? 'midnight' : C.fmtMin(h * 60)]);
-const DAYS = [['', 'Every day'], ...C.DOW.map((d, i) => [String(i), `${C.DAY_NAME[d]}s only`])];
+// ---------- v21: Savings (one test at a time, in plain words) ----------
 const CONTROL = { yes: 'Yes — you control it', partly: 'Partly', unknown: 'Unknown until you find what it is', no: 'No' };
 const expEval = (e) => A.evaluateExperiment({ state: S, temps: allTemps(), exp: e });
-function expCard(e) {
-  const r = expEval(e), running = !e.end;
-  const money2 = r.monthly?.dollars ? ` ≈ ${money(r.monthly.dollars[0])}–${money(r.monthly.dollars[1])} a month` : '';
-  return `<li><b>${esc(e.title)}</b> <span class="kind-chip">${running ? 'Running' : 'Ended'} · ${esc(r.label)}</span>
-    <small>${esc(r.window ? `${r.window}${e.days ? `, ${C.DAY_NAME[C.DOW[e.days[0]]]}s` : ''}` : '')} · started ${esc(shortDate(e.start))}${e.end ? `, ended ${esc(shortDate(e.end))}` : ''}</small>
+function testCard(e) {
+  const r = expEval(e), running = !e.end, when = A.windowLabel(e.hours, e.days);
+  const showDetail = r.status === 'collecting' ? `<p>${esc(r.detail)}</p>` : '';
+  const why = r.status === 'collecting' ? '' : `<details class="more"><summary>${['inconclusive', 'too_small'].includes(r.status) ? 'Why can’t we tell?' : 'Details'}</summary>
     <p>${esc(r.detail || '')}</p>
-    ${r.monthly ? `<p class="fine">If it continues: ${num(r.monthly.kwh[0], 1)}–${num(r.monthly.kwh[1], 1)} kWh a month${money2}. ${esc(r.monthly.method)}</p>` : ''}
-    ${r.engineering ? `<p class="fine">Engineering estimate: ${num(r.engineering.kwh_month, 1)} kWh a month${r.engineering.dollars != null ? ` ≈ ${money(r.engineering.dollars)}` : ''}. ${esc(r.engineering.method)}</p>` : ''}
+    ${['inconclusive', 'too_small'].includes(r.status) ? `<p class="fine">A small device — a TV in standby uses only a few watts — is hidden by normal ${esc(r.unit || 'day')}-to-${esc(r.unit || 'day')} changes in a whole home’s hourly readings.${r.mde_kwh != null ? ` Here the readings could only show a change of about ${num(r.mde_kwh, 1)} kWh a ${esc(r.unit || 'day')} or more.` : ''} Bigger changes can still be measured.</p>` : ''}
+    ${r.monthly ? `<p class="fine">If it continues: ${num(r.monthly.kwh[0], 1)}–${num(r.monthly.kwh[1], 1)} kWh a month${r.monthly.dollars ? ` ≈ ${money(r.monthly.dollars[0])}–${money(r.monthly.dollars[1])}` : ''}. ${esc(r.monthly.method)}</p>` : ''}
+    ${r.engineering ? `<p class="fine">Estimate from the device’s wattage (not measured): ${num(r.engineering.kwh_month, 1)} kWh a month${r.engineering.dollars != null ? ` ≈ ${money(r.engineering.dollars)}` : ''}. ${esc(r.engineering.method)}</p>` : ''}
     ${r.method ? `<p class="fine">How it was compared: ${esc(r.method)}.${(r.caveats || []).map((c) => ` ${esc(c)}`).join('')}</p>` : ''}
-    <div class="row2">${running ? `<button class="btn secondary" data-act="exp-end" data-id="${esc(e.id)}">End the test</button><label class="item"><span>Mark an unusual day (away, guests)</span><input type="date" data-exp-exclude="${esc(e.id)}"></label>`
-      : e.decision ? `<p class="fine">You decided to ${e.decision === 'keep' ? 'keep this change' : 'go back'}. <button class="link" data-act="exp-decide" data-id="${esc(e.id)}" data-v="">Change</button></p>`
-        : `<button class="btn primary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="keep">Keep the change</button><button class="btn secondary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="revert">Go back</button>`}</div></li>`;
-}
-function expForm() {
-  const d = expDraft || {};
-  const sel = (id, opts, cur) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  return `<section class="card" id="exp-form"><p class="card-label">Try a change and measure it</p>
-    <p class="fine">Pick one change, start it today, and keep everything else as usual. The app compares the same hours with the weeks before, allowing for the weather. Import a newer Delmarva file after a week or two to see the result.</p>
-    <div class="bill-form"><label class="item"><span>What will you change?</span><input id="exp-title" maxlength="160" value="${esc(d.title || '')}" placeholder="e.g. switch off the old TV box overnight"></label>
-    <label class="item"><span>From</span>${sel('exp-h0', HOURS.slice(0, 24), d.hours ? d.hours[0] : '')}</label><label class="item"><span>Until</span>${sel('exp-h1', HOURS.slice(1), d.hours ? d.hours[1] : 24)}</label>
-    <label class="item"><span>Days</span>${sel('exp-days', DAYS, d.days ? d.days[0] : '')}</label>
-    <details><summary>The device’s wattage, if you know it (optional)</summary><label class="item"><span>Watts (from its label)</span><input type="number" inputmode="numeric" id="exp-watts" min="1" value="${d.watts || ''}"></label><label class="item"><span>Hours a day it ran</span><input type="number" inputmode="decimal" id="exp-hpd" min="0.5" max="24" step="0.5" value="${d.hoursPerDay || ''}"></label><p class="fine">Lets the app tell you when a change is too small for the meter to show, and estimate it instead.</p></details>
-    <label class="item"><span>Involves heating or cooling</span><input type="checkbox" id="exp-cool" ${d.cooling ? 'checked' : ''}></label>
-    <label class="item"><span>Start date</span><input type="date" id="exp-start" value="${esc(d.start || todayIso())}"></label>
-    <button class="btn primary" data-act="exp-start">Start the test</button></div></section>`;
+    ${running ? `<label class="item"><span>Something unusual one day (guests, away)? Leave it out:</span><input type="date" data-exp-exclude="${esc(e.id)}"></label>` : ''}</details>`;
+  const actions = running ? `<div class="btnrow"><button class="btn secondary" data-act="exp-end" data-id="${esc(e.id)}">End test</button><button class="btn plain" data-act="exp-edit" data-id="${esc(e.id)}">Correct</button><button class="btn plain danger" data-act="exp-cancel" data-id="${esc(e.id)}">Cancel</button></div>`
+    : e.decision ? `<p class="fine">You chose to ${e.decision === 'keep' ? 'keep this change' : 'go back'}. <button class="link" data-act="exp-decide" data-id="${esc(e.id)}" data-v="">Change</button></p>` : `<div class="btnrow"><button class="btn primary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="keep">Keep the change</button><button class="btn secondary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="revert">Go back</button></div>`;
+  return `<section class="card test"><p class="eyebrow-s">${running ? 'Testing' : 'Finished test'}</p><h2>${esc(e.title)}</h2><p class="fine">${esc(when)} · from ${esc(shortDate(e.start))}${e.end ? ` to ${esc(shortDate(e.end))}` : ''}</p>
+    <p class="result r-${esc(r.status)}">${esc(r.label)}</p>${showDetail}${why}${actions}</section>`;
 }
 function viewSavingsTab() {
-  const out = [pagehead('Savings', 'Test a change — the meter shows whether it worked')];
-  if (!usageDays().length) return `${out.join('')}<section class="card"><p>Import your Delmarva file first; savings are worked out from your own readings.</p>${importButton()}</section>`;
-  const sp = planNow(), exps = (S.experiments || []).slice().reverse();
-  if (sp.note) out.push(`<section class="card good"><p>${esc(sp.note)}</p></section>`);
-  const active = exps.filter((e) => !e.end), done = exps.filter((e) => e.end);
-  if (active.length) out.push(`<h2 class="section-title">Running now</h2><section class="card"><ul class="findings exps">${active.map(expCard).join('')}</ul></section>`);
-  out.push(`<h2 class="section-title">Worth looking into</h2>`);
-  if (!sp.items.length) out.push('<section class="card"><p>Nothing in your readings clearly points to a saving right now.</p></section>');
-  for (const o of sp.items) out.push(`<section class="card opp"><h2>${esc(o.action)}</h2><p>${esc(o.why)}</p>
-    <dl class="facts"><dt>Evidence</dt><dd>${esc(o.evidence || '')}</dd><dt>Can you control it?</dt><dd>${esc(CONTROL[o.control] || o.control)}</dd><dt>Possible saving</dt><dd>${esc(savingLine(o))}</dd><dt>How it’s worked out</dt><dd>${esc(o.savings.method)}</dd><dt>Confidence in the evidence</dt><dd>${esc(CONF[o.confidence])}</dd><dt>Cost and effort</dt><dd>${esc(o.cost)} · ${esc(EFFORT[o.effort])}</dd><dt>Comfort</dt><dd>${esc(COMFORT[o.comfort])}</dd><dt>How we’ll know</dt><dd>${esc(o.verify)}</dd></dl>
-    ${o.thermostat ? '<p class="fine">Involves the thermostat — the app never changes it; you do.</p>' : ''}
-    ${o.experiment ? `<button class="btn secondary" data-act="exp-prefill" data-src="${esc(o.id)}">Test this</button>` : ''}</section>`);
-  out.push(expForm());
-  if (done.length) out.push(`<h2 class="section-title">Finished tests</h2><section class="card"><ul class="findings exps">${done.map(expCard).join('')}</ul></section>`);
-  out.push(`<h2 class="section-title">Looked at, not worth it now</h2><section class="card"><ul class="bullets">${sp.considered.map((c) => `<li><b>${esc(c.what)}</b> — ${esc(c.why)}${c.experiment ? ` <button class="link" data-act="exp-prefill" data-src="${esc(c.id)}">Test it anyway</button>` : ''}</li>`).join('')}</ul></section>`);
+  const out = [pagehead('Savings')];
+  if (!usageDays().length) return `${out.join('')}<section class="card"><p>Import your Delmarva file first; ideas come from your own readings.</p>${importButton()}</section>`;
+  const sp = planNow(), exps = (S.experiments || []).slice().reverse(), active = exps.filter((e) => !e.end), done = exps.filter((e) => e.end);
+  active.forEach((e) => out.push(testCard(e)));
+  if (!active.length) out.push(`<section class="card home"><div class="q"><p class="lead">Try one small change, and let your electricity readings show whether it helped.</p><button class="btn primary" data-act="try-open">Try something</button></div></section>`);
+  const ideas = sp.items.slice(0, 2);
+  out.push(`<h2 class="section-title">Ideas</h2>`);
+  if (!ideas.length) out.push('<section class="card"><p>Nothing in your readings clearly points to a saving right now.</p></section>');
+  for (const o of ideas) out.push(`<section class="card idea"><h2>${esc(o.short || o.action)}</h2><p>${esc(o.savings.dollars ? savingLine(o) : 'We can’t say yet how much this would save.')}</p>
+    <details class="more"><summary>Why this, and how we’d know</summary><p>${esc(o.why)}</p><dl class="facts"><dt>Evidence</dt><dd>${esc(o.evidence || '')}</dd><dt>Can you control it?</dt><dd>${esc(CONTROL[o.control] || o.control)}</dd><dt>How it’s worked out</dt><dd>${esc(o.savings.method)}</dd><dt>Effort</dt><dd>${esc(EFFORT[o.effort])}</dd><dt>Comfort</dt><dd>${esc(COMFORT[o.comfort])}</dd><dt>How we’ll know</dt><dd>${esc(o.verify)}</dd></dl>${o.caveat ? `<p class="fine">${esc(o.caveat)}</p>` : ''}${o.thermostat ? '<p class="fine">Involves the thermostat — the app never changes it; you do.</p>' : ''}</details>
+    ${o.experiment ? `<button class="btn secondary" data-act="try-open" data-src="${esc(o.id)}">Try this</button>` : ''}</section>`);
+  if (done.length) out.push(`<h2 class="section-title">Finished tests</h2>${done.map(testCard).join('')}`);
   const acts = actsList();
-  if (acts) out.push(`<h2 class="section-title">Earlier tracked actions</h2><section class="card"><ul class="findings actions">${acts}</ul></section>`);
-  out.push(viewSavings().replace(/^.*?<\/header>/s, '<h2 class="section-title">Thermostat schedule results</h2>'));
+  out.push(`<details class="more card-more" ${moreOpen.savings ? 'open' : ''}><summary>More</summary><h3>Looked at, not worth it now</h3><ul class="bullets">${sp.considered.map((c) => `<li><b>${esc(c.what)}</b> — ${esc(c.why)}${c.experiment ? ` <button class="link" data-act="try-open" data-src="${esc(c.id)}">Test it anyway</button>` : ''}</li>`).join('')}</ul>${acts ? `<h3>Earlier tracked actions</h3><ul class="findings actions">${acts}</ul>` : ''}${viewSavings().replace(/^.*?<\/header>/s, '<h3>Thermostat schedule results</h3>')}</details>`);
   return out.join('');
+}
+
+// ---------- v21: the guided “try something” flow — three short steps ----------
+let tryDraft = null;
+/** Copy what is typed on the current step into the draft (inputs aren't re-rendered while typing, so the keyboard stays open). */
+function tryReadStep() {
+  const d = tryDraft; if (!d) return;
+  const v = (id) => document.getElementById(id);
+  if (d.step === 1 && v('try-title')) d.title = v('try-title').value;
+  if (d.step === 2) { if (v('try-from')) d.from = v('try-from').value || d.from; if (v('try-until')) d.until = v('try-until').value || d.until; if (v('try-allday')) d.allDay = v('try-allday').checked; if (v('try-start')) d.startDate = v('try-start').value; if (v('try-watts')) d.watts = v('try-watts').value; if (v('try-hpd')) d.hpd = v('try-hpd').value; if (v('try-cool')) d.cooling = v('try-cool').checked; }
+}
+const TRY_EXAMPLES = ['Unplug my living room TV overnight', 'Turn off the office computer at night', 'Switch off the old game console'];
+const newTry = (over = {}) => ({ step: 1, title: '', mode: 'every', days: [], from: '22:00', until: '06:00', allDay: false, watts: '', hpd: '', cooling: false, startDate: '', editingId: null, ...over });
+const hhmm = (h) => `${String(h % 24).padStart(2, '0')}:00`;
+const parseHr = (v) => { const [h, m] = String(v || '').split(':').map(Number); return Number.isFinite(h) ? (m >= 30 ? h + 1 : h) % 24 : null; };
+function tryWindow(d) {
+  const days = d.mode === 'weekdays' ? [1, 2, 3, 4, 5] : d.mode === 'weekends' ? [0, 6] : d.mode === 'specific' ? [...d.days].sort() : null;
+  if (d.allDay) return { hours: null, days };
+  const h0 = parseHr(d.from); let h1 = parseHr(d.until);
+  if (h0 == null || h1 == null) return { error: 'Choose a start and an end time.' };
+  if (h1 === 0 && h0 > 0) h1 = 24;
+  if (h0 === h1) return { error: 'Choose two different times — for example 10 PM to 6 AM.' };
+  return { hours: [h0, h1], days };
+}
+function tryWhenText(d) {
+  const w = tryWindow(d); if (w.error) return w.error;
+  const wd = new Date(`${todayIso()}T12:00:00Z`).getUTCDay(), tonight = !!w.hours && A.isOvernight(w.hours) && (!w.days || w.days.includes(wd));
+  const base = A.windowLabel(w.hours, w.days, { tonight });
+  const hrs = w.hours ? A.windowHours(w.hours) : 24;
+  return `${base}${w.hours ? ` (${hrs} hour${hrs === 1 ? '' : 's'})` : ''}`;
+}
+function viewTry() {
+  const d = tryDraft || (tryDraft = newTry());
+  const dots = `<p class="stepdots" aria-label="Step ${d.step} of 3">${[1, 2, 3].map((n) => `<i class="${n === d.step ? 'on' : n < d.step ? 'done' : ''}"></i>`).join('')}</p>`;
+  const head = `${back(d.editingId ? 'savings' : 'savings', 'Savings')}${pagehead(d.editingId ? 'Correct your test' : 'Try something', `Step ${d.step} of 3`)}${dots}`;
+  if (d.step === 1) return `${head}<section class="card flow">
+    <label class="biglabel" for="try-title">What would you like to change?</label>
+    <input id="try-title" class="field" type="text" maxlength="120" autocomplete="off" enterkeyhint="next" placeholder="e.g. Unplug my living room TV overnight" value="${esc(d.title)}">
+    <p class="fine">Or tap an idea:</p><div class="chips">${TRY_EXAMPLES.map((t) => `<button type="button" data-act="try-example" data-v="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+    <p class="err" id="try-err" role="alert"></p></section>
+    <div class="actionbar"><button class="btn primary" data-act="try-next">Next</button></div>`;
+  if (d.step === 2) {
+    const modes = [['every', 'Every day'], ['weekdays', 'Weekdays'], ['weekends', 'Weekends'], ['specific', 'Specific days']];
+    return `${head}<section class="card flow"><h2 class="biglabel">When will you do it?</h2>
+      <div class="chips choice" role="radiogroup" aria-label="Which days">${modes.map(([k, l]) => `<button type="button" role="radio" aria-checked="${d.mode === k}" class="${d.mode === k ? 'on' : ''}" data-act="try-mode" data-v="${k}">${l}</button>`).join('')}</div>
+      ${d.mode === 'specific' ? `<div class="chips days" role="group" aria-label="Pick days">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((l, i) => `<button type="button" aria-pressed="${d.days.includes(i)}" aria-label="${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][i]}" class="${d.days.includes(i) ? 'on' : ''}" data-act="try-dow" data-v="${i}">${l}</button>`).join('')}</div>` : ''}
+      <div class="timepair ${d.allDay ? 'off' : ''}"><label>From<input id="try-from" type="time" step="3600" value="${esc(d.from)}" ${d.allDay ? 'disabled' : ''}></label><span aria-hidden="true">→</span><label>Until<input id="try-until" type="time" step="3600" value="${esc(d.until)}" ${d.allDay ? 'disabled' : ''}></label></div>
+      <label class="check"><input type="checkbox" id="try-allday" ${d.allDay ? 'checked' : ''}> All day, no specific hours</label>
+      <p class="summary" id="try-summary" aria-live="polite">${esc(tryWhenText(d))}</p>
+      <p class="fine">Readings are hourly, so times are rounded to the hour. Past midnight is fine: 10 PM to 6 AM is one night.</p>
+      <details class="more"><summary>More options</summary>
+        <label class="item"><span>Started on a different date?</span><input type="date" id="try-start" value="${esc(d.startDate)}"></label>
+        <label class="item"><span>The device’s watts, if you know (from its label)</span><input type="number" inputmode="numeric" id="try-watts" min="1" value="${esc(d.watts)}"></label>
+        <label class="item"><span>Hours a day it runs</span><input type="number" inputmode="decimal" id="try-hpd" min="0.5" max="24" step="0.5" value="${esc(d.hpd)}"></label>
+        <label class="check"><input type="checkbox" id="try-cool" ${d.cooling ? 'checked' : ''}> This involves heating or cooling</label></details>
+      <p class="err" id="try-err" role="alert"></p></section>
+    <div class="actionbar"><button class="btn secondary" data-act="try-back">Back</button><button class="btn primary" data-act="try-next">Next</button></div>`;
+  }
+  const w = tryWindow(d), over = !!w.hours && A.isOvernight(w.hours), unit = over ? 'nights' : 'days', last = usageDays().at(-1)?.date;
+  return `${head}<section class="card flow"><h2 class="biglabel">${d.editingId ? 'Save your changes?' : 'Ready to start?'}</h2>
+    <p class="lead">${esc(d.title)}</p><p class="summary">${esc(tryWhenText(d))}</p>
+    <p>${d.editingId ? 'Your test keeps its start. Only the details change.' : `Make the change yourself — the app can’t control anything. We’ll compare your electricity readings after you’ve tried it for several ${unit}.`}</p>
+    <p class="fine">Your newest reading is from ${esc(shortDate(last))}. After a few ${unit}, import a newer Delmarva file to see the result.</p></section>
+    <div class="actionbar"><button class="btn secondary" data-act="try-back">Back</button><button class="btn primary" data-act="try-start">${d.editingId ? 'Save changes' : 'I’ve started this change'}</button></div>`;
 }
 
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
@@ -803,7 +869,7 @@ const weatherLink = () => `<a class="card" href="#weather"><p class="card-label"
 function viewInsights() {
   const days = usageDays();
   const last = days.length ? days[days.length - 1].date : null;
-  const out = [pagehead('Insights', last ? `Electricity data through ${esc(dayLabel(last))}` : 'Electricity, weather and savings')];
+  const out = [back('today', 'Home'), pagehead('Your electricity use', last ? `Readings through ${esc(dayLabel(last))}` : 'Electricity, weather and savings')];
   if (!days.length) {
     out.push(`<section class="card"><h2>See what’s actually working</h2><p>Import your Delmarva usage file. It’s analyzed on this device and matched with Wilmington weather automatically.</p>${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}</section>`);
     out.push(disclosure('howto', 'How to get the file from Delmarva', HOW_TO_DOWNLOAD, true));
@@ -835,7 +901,7 @@ function viewInsights() {
 
 function viewUsage() {
   const s = C.usageSummary(S.usage, S.profile.tariff, 60);
-  if (!s) return `${back('insights', 'Insights')}${pagehead('Electricity use')}<section class="card"><p>No electricity data yet.</p>${importButton()}</section>`;
+  if (!s) return `${back('insights', 'Your electricity use')}${pagehead('Electricity use')}<section class="card"><p>No electricity data yet.</p>${importButton()}</section>`;
   const r = s.recent, temps = allTemps();
   const daily = barChart(r.map((d) => d.kwh), { label: 'Daily electricity use, kWh', ticks: r.map((d) => dayLabel(d.date, { month: 'numeric', day: 'numeric' })), tips: r.map((d) => `${dayLabel(d.date)}: ${num(d.kwh, 1)} kWh${d.cost != null ? ` · ${money(d.cost)}` : ''}${Number.isFinite(temps[d.date]) ? ` · ${num(temps[d.date])}°F outside` : ''}`), low: (i) => C.isWeekendDate(r[i].date) });
   const pk = A.peakWindow(s.hourProfile);
@@ -855,7 +921,7 @@ function viewUsage() {
           : `Outdoor temperature explains only ${num(Math.max(0, m.r2) * 100)}% of your day-to-day differences.`;
     weather = `<p>${esc(line)}</p>${scatterChart(pts, curve)}${disclosure('bins', 'Table by outdoor temperature', `<div class="table-wrap"><table><thead><tr><th>Outdoor average</th><th class="t">Days</th><th class="t">kWh a day</th></tr></thead><tbody>${m.bins.map((b) => `<tr><td>${b.lo}–${b.lo + 9}°F</td><td class="t">${b.n}</td><td class="t">${num(b.avg, 1)}</td></tr>`).join('')}</tbody></table></div>`)}`;
   }
-  return `${back('insights', 'Insights')}${pagehead('Electricity use', `${esc(dayLabel(s.from))} – ${esc(dayLabel(s.to))}`)}
+  return `${back('insights', 'Your electricity use')}${pagehead('Electricity use', `${esc(dayLabel(s.from))} – ${esc(dayLabel(s.to))}`)}
     <section class="card"><div class="stats"><div class="stat"><b>${num(s.avg, 1)}</b><span>kWh a day</span></div><div class="stat"><b>${num(s.weekdayAvg, 1)} / ${num(s.weekendAvg, 1)}</b><span>weekday / weekend</span></div><div class="stat"><b>${s.cost != null ? money(s.cost) : '—'}</b><span>${s.costSource ? esc(s.costSource) : 'cost needs a rate from your bill'}</span></div><div class="stat"><b>${s.baseLoad != null ? `${num(s.baseLoad * 1000)} W` : '—'}</b><span>always on</span></div></div></section>
     <section class="card"><h2>Day by day</h2><p class="fine">Lighter bars are weekends.</p>${daily}</section>${prof}
     <section class="card"><h2>Weather and your use</h2>${weather}</section>`;
@@ -887,7 +953,7 @@ function viewSavings() {
   const versions = sv.segments?.length ? `<div class="table-wrap"><table><thead><tr><th>Schedule from</th><th class="t">Days</th><th class="t">vs. baseline</th></tr></thead><tbody>${sv.segments.map((g) => `<tr><td>${esc(shortDate(g.from))}${g.to ? ` – ${esc(shortDate(g.to))}` : ' – now'}</td><td class="t">${num(g.ev.after ?? 0)}</td><td class="t">${g.ev.diff != null ? `${num(g.ev.diff)} ± ${num(g.ev.unc)} kWh` : 'not enough days'}</td></tr>`).join('')}</tbody></table></div>` : '';
   const hist = (S.programmedHistory || []).slice().reverse();
   const history = hist.length ? `<ul class="bullets">${hist.map((h) => `<li><b>${esc(dayLabel(h.date))}</b> — ${esc(h.changes.length ? h.changes.join('; ') : 'Schedule confirmed')}</li>`).join('')}</ul>${versions}<p class="fine">Recorded when you tap “Done — it’s programmed”. The app can’t see the thermostat, so these are your confirmations, not readings from the device.</p>` : '<p class="fine">No schedule has been confirmed as programmed yet.</p>';
-  return `${back('insights', 'Insights')}${pagehead('Savings')}
+  return `${back('insights', 'Your electricity use')}${pagehead('Savings')}
     <section class="card ${sv.status === 'likely_savings' ? 'good' : sv.status === 'likely_increase' ? 'warn' : ''}"><h2>${esc(headline[0])}</h2><p>${esc(headline[1])}</p></section>
     <h2 class="section-title">What’s needed</h2><section class="card">${checklist}</section>
     ${breakdown}
@@ -913,7 +979,7 @@ function viewWeather() {
   const months = Wx.monthlySummary(WD.daily).slice(-13).reverse();
   const skill = Object.entries(WD.skill || {});
   const ops = opsItems();
-  return `${back('insights', 'Insights')}${pagehead('Weather', esc(LOC.name))}
+  return `${back('today', 'Home')}${pagehead('Weather', esc(LOC.name))}
     ${ops.length ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Heads-up</p>${ops.map((x) => `<h2>${esc(x.title)}</h2><p>${esc(x.detail)}</p>`).join('')}</section>` : ''}
     ${nowCard}
     <section class="card"><h2>7-day forecast</h2><p class="fine">National Weather Service forecast for ${LOC.name}${ft ? `, updated ${esc(clock(ft))}` : ''}. High / low.</p>${list}</section>
@@ -968,6 +1034,7 @@ function noteSaved(what) {
 
 function viewSettings() {
   const p = S.profile;
+  const more = `<section class="group"><div class="group-head"><h2>More</h2></div><a class="item link" href="#thermostat">Thermostat and schedule</a><a class="item link" href="#insights">Your electricity use in detail</a><a class="item link" href="#weather">Weather</a></section>`;
   const modes = C.BUILDING_MODES[p.buildingMode] ?? [];
   const days = usageDays();
   const obs = [...S.observations].sort((a, b) => b.ts - a.ts).slice(0, 8);
@@ -989,7 +1056,7 @@ function viewSettings() {
     ${group('Privacy and backup', 'Your settings and electricity data stay on this device. The app only downloads public weather for Wilmington; nothing personal is sent anywhere.', `<div class="item col"><div class="row2"><button class="btn primary" data-act="export">Save backup</button><label class="btn secondary file">Restore or merge<input type="file" id="backup-file" accept=".json,application/json"></label></div><p class="fine">Moving between your Mac and iPhone: save a backup on one, then “Restore or merge” on the other. You’ll see what will be added and choose anything that conflicts; nothing is replaced unless you ask.</p>${hasSnapshot() ? '<button class="btn plain" data-act="undo-last">Undo the last merge, restore or routine update</button>' : ''}</div>`)}
     ${disclosure('advanced', 'Advanced', advanced)}
     ${IOS && !STANDALONE ? '<p class="fine center">Install: tap Share → Add to Home Screen. The installed app keeps its own data, separate from Safari.</p>' : ''}`;
-  return `${pagehead('Settings')}${savedBanner()}<div class="settings-cols"><div class="stack">${left}</div><div class="stack">${right}</div></div>`;
+  return `${back('today', 'Home')}${pagehead('Settings')}${savedBanner()}${more}<div class="settings-cols"><div class="stack">${left}</div><div class="stack">${right}</div></div>`;
 }
 
 const SUPPORT_MSG = 'I have a Delmarva Power Energy Wise Rewards web-programmable Emerson thermostat, likely an IntelliTEMP IT900. In My Account, Program Your Thermostat -> View Thermostat fails with: "The remote name could not be resolved: apigateway-east.exeloncorp.com". Is remote programming for legacy thermostats currently supported, planned to be restored, or discontinued? Is there an official replacement portal or authorized integration/API? Can you identify the hardware revision and the purpose of the small modular-style jack on the side? I want to keep the existing thermostat working safely and avoid modifying the utility equipment. Please respond by email if possible.';
@@ -1086,18 +1153,19 @@ function viewProgram() {
 
 // ---------- rendering ----------
 
-const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavingsTab, schedule: viewSchedule, investigate: viewInvestigate, restore: viewRestore, bills: viewBills };
-const PARENT = { restore: 'settings', investigate: 'insights', weather: 'insights', usage: 'insights', schedule: 'today' };
-const TITLES = { bills: 'Your bill', restore: 'Restore or merge', investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
+const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavingsTab, thermostat: viewThermostat, try: viewTry, schedule: viewSchedule, investigate: viewInvestigate, restore: viewRestore, bills: viewBills };
+const PARENT = { insights: 'today', investigate: 'today', weather: 'today', usage: 'today', schedule: 'today', thermostat: 'today', setup: 'today', program: 'today', try: 'savings' };
+const TITLES = { settings: 'Settings', savings: 'Savings', today: 'Home', thermostat: 'Thermostat', try: 'Try something', insights: 'Your electricity use', bills: 'Bills', restore: 'Restore or merge', investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
 const route = () => { const h = location.hash.slice(1); return ROUTES[h] ? h : 'today'; };
 
 function render() {
   const r = route();
-  const flow = r === 'setup' || r === 'program';
+  const flow = r === 'setup' || r === 'program' || r === 'try';
   document.body.classList.toggle('in-flow', flow);
   const tab = PARENT[r] || r;
   document.querySelectorAll('[data-tab]').forEach((a) => a.setAttribute('aria-current', a.dataset.tab === tab ? 'page' : 'false'));
   $('#view').innerHTML = ROUTES[r]();
+  if (['today', 'bills', 'savings'].includes(r)) $('#view .pagehead')?.insertAdjacentHTML('beforeend', GEAR);
   document.title = `${TITLES[r] || TABS.find(([k]) => k === r)[1]} · Energy`;
 }
 
@@ -1329,23 +1397,53 @@ const ACTIONS = {
     render(); toast(`Saved: ${t.setpoint}°F${t.hold ? ' HOLD' : ''}, programming ${t.programming}. The thermostat itself is unchanged.`);
   },
 
-  'exp-prefill'(el) {
-    const sp = planNow(), o = [...sp.items, ...sp.considered].find((x) => x.id === el.dataset.src);
-    if (!o?.experiment) return;
-    expDraft = { ...o.experiment, start: todayIso() };
-    render(); document.getElementById('exp-form')?.scrollIntoView({ block: 'start' });
+  'household-review'() { if (householdUpdate) { pendingRestore = { name: 'Mac companion', kind: 'household', update: householdUpdate }; location.hash = 'restore'; render(); } },
+  'try-open'(el) {
+    const sp = planNow(), o = el.dataset.src ? [...sp.items, ...sp.considered].find((x) => x.id === el.dataset.src) : null, x = o?.experiment;
+    tryDraft = newTry(x ? { title: x.title, from: x.hours ? hhmm(x.hours[0]) : '22:00', until: x.hours ? hhmm(x.hours[1] % 24) : '06:00', allDay: !x.hours, cooling: !!x.cooling, mode: x.days ? 'specific' : 'every', days: x.days || [] } : {});
+    location.hash = 'try'; render(); window.scrollTo(0, 0);
   },
-  'exp-start'() {
-    const v = (id) => document.getElementById(id)?.value ?? '';
-    const title = v('exp-title').trim(), h0 = +v('exp-h0'), h1 = +v('exp-h1'), dd = v('exp-days'), start = v('exp-start');
-    if (!title) return toast('Describe the change in a few words.', true);
-    if (!(h1 > h0)) return toast('“Until” must be after “From”.', true);
-    const e = { id: `x${Date.now().toString(36)}`, title, start: start || todayIso(), hours: h0 === 0 && h1 === 24 ? null : [h0, h1], days: dd === '' ? null : [+dd],
-      watts: +v('exp-watts') || null, hoursPerDay: +v('exp-hpd') || null, cooling: !!document.getElementById('exp-cool')?.checked, at: todayIso() };
-    const overlap = (S.experiments || []).find((o) => !o.end);
-    if (overlap && !confirm(`“${overlap.title}” is still running. Two changes at once can’t be told apart — start anyway?`)) return;
-    try { commitAndReload({ ...S, experiments: A.cleanExperiments([...(S.experiments || []), e]) }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
-    expDraft = null; render(); toast('Test started. Keep everything else as usual; import a newer Delmarva file in a week or two.');
+  'try-example'(el) { const t = document.getElementById('try-title'); if (t) { t.value = el.dataset.v; t.focus(); } },
+  'try-mode'(el) { tryReadStep(); tryDraft.mode = el.dataset.v; render(); },
+  'try-dow'(el) { tryReadStep(); const i = +el.dataset.v; tryDraft.days = tryDraft.days.includes(i) ? tryDraft.days.filter((x) => x !== i) : [...tryDraft.days, i]; render(); },
+  'try-back'() { tryReadStep(); if (tryDraft.step > 1) { tryDraft.step--; render(); window.scrollTo(0, 0); } else { location.hash = 'savings'; } },
+  'try-next'() {
+    tryReadStep();
+    const d = tryDraft, say = (m) => { const e = document.getElementById('try-err'); if (e) e.textContent = m; };
+    if (d.step === 1) { if (!d.title.trim()) return say('Write a few words about what you’ll change.'); d.step = 2; }
+    else if (d.step === 2) { const w = tryWindow(d); if (w.error) return say(w.error); if (d.mode === 'specific' && !d.days.length) return say('Pick at least one day.'); d.step = 3; }
+    render(); window.scrollTo(0, 0);
+  },
+  'try-start'() {
+    const d = tryDraft, w = tryWindow(d);
+    if (!d || w.error || !d.title.trim()) return toast(w?.error || 'Describe the change first.', true);
+    const today = todayIso(), start = d.startDate || today, hour = String(C.localParts(Date.now()).hour).padStart(2, '0');
+    const fields = { title: d.title.trim().slice(0, 160), hours: w.hours, days: w.days, watts: +d.watts || null, hoursPerDay: +d.hpd || null, cooling: !!d.cooling };
+    let list;
+    if (d.editingId) list = (S.experiments || []).map((e) => (e.id === d.editingId ? { ...e, ...fields } : e));
+    else {
+      const e = { id: `x${Date.now().toString(36)}`, ...fields, start, startedAt: start === today ? `${today}T${hour}` : `${start}T00`, at: today };
+      const clash = (S.experiments || []).find((o) => !o.end && A.windowsOverlap(o, { ...e, end: '' }));
+      if (clash && !confirm(`“${clash.title}” is still running at some of the same hours. Two changes at once can’t be told apart — start anyway?`)) return;
+      list = [...(S.experiments || []), e];
+    }
+    const next = A.cleanExperiments(list);
+    if (next.some((e) => e.invalid)) return toast('That time window isn’t valid. Go back and check it.', true);
+    try { commitAndReload({ ...S, experiments: next }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    tryDraft = null; location.hash = 'savings'; render(); window.scrollTo(0, 0);
+    toast(d.editingId ? 'Saved.' : 'Test started. After a few nights, import a newer Delmarva file to see how it went.');
+  },
+  'exp-edit'(el) {
+    const e = (S.experiments || []).find((x) => x.id === el.dataset.id); if (!e) return;
+    const mode = !e.days ? 'every' : [...e.days].join() === '1,2,3,4,5' ? 'weekdays' : [...e.days].join() === '0,6' ? 'weekends' : 'specific';
+    tryDraft = newTry({ step: 1, title: e.title, mode, days: e.days || [], from: e.hours ? hhmm(e.hours[0]) : '22:00', until: e.hours ? hhmm(e.hours[1] % 24) : '06:00', allDay: !e.hours, watts: e.watts || '', hpd: e.hoursPerDay || '', cooling: e.cooling, editingId: e.id, startDate: '' });
+    location.hash = 'try'; render(); window.scrollTo(0, 0);
+  },
+  'exp-cancel'(el) {
+    const e = (S.experiments || []).find((x) => x.id === el.dataset.id); if (!e) return;
+    if (!confirm(`Cancel “${e.title}”? The test is removed (you can undo from Settings).`)) return;
+    try { commitAndReload({ ...S, experiments: (S.experiments || []).filter((x) => x.id !== e.id) }, 'cancel test'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    render(); toast('Test cancelled.');
   },
   'exp-end'(el) {
     S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, end: todayIso() < e.start ? e.start : todayIso() } : e)));
@@ -1476,6 +1574,8 @@ document.addEventListener('toggle', (e) => {
   if (d.matches?.('details.disclosure')) { UI.open = { ...UI.open, [d.dataset.id]: d.open }; saveUI(); }
 }, true);
 
+const moreOpen = {};
+document.addEventListener('toggle', (e) => { if (e.target.matches?.('details.more.card-more')) moreOpen[route()] = e.target.open; }, true);
 let pendingBilling = [], billingImported = false; // billing periods from an export that need a decision
 async function importUsage(files) {
   busy = 'import';
@@ -1580,6 +1680,12 @@ document.addEventListener('change', async (e) => {
     return;
   }
   if (el.id === 'backup-file' && el.files[0]) return openRestoreFile(el.files[0]);
+  if (['try-from', 'try-until', 'try-allday'].includes(el.id) && tryDraft) {
+    tryReadStep();
+    const sm = document.getElementById('try-summary'); if (sm) sm.textContent = tryWhenText(tryDraft);
+    if (el.id === 'try-allday') { document.querySelectorAll('#try-from,#try-until').forEach((i) => { i.disabled = tryDraft.allDay; }); document.querySelector('.timepair')?.classList.toggle('off', tryDraft.allDay); }
+    return;
+  }
   if (el.dataset.expExclude && el.value) {
     S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.expExclude ? { ...e, exclude: [...new Set([...(e.exclude || []), el.value])] } : e)));
     save(); render(); toast('That day is left out of the comparison.');
