@@ -358,3 +358,16 @@ td small { display: block; color: var(--ink-3); font-size: 12px; font-weight: 40
 button.link { background: none; border: 0; padding: 0; color: var(--accent, #0a66d8); font: inherit; cursor: pointer; text-decoration: underline; }
 .decision h3 { margin: 2px 0 6px; font-size: 18px; }
 .findings.explain li.out b { color: var(--ink-3); text-decoration: line-through; }
+
+/* Investigation */
+.hyps { list-style: none; padding: 0; margin: 6px 0 10px; display: grid; gap: 6px; }
+.hyps li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--line); font-size: 14px; }
+.hyps li em { font-style: normal; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.hyps li.good { background: var(--green-soft); } .hyps li.good em { color: var(--green); }
+.hyps li.out span { text-decoration: line-through; color: var(--ink-3); }
+.ask { margin-top: 12px; padding-top: 12px; border-top: .5px solid var(--line); }
+.answers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.answers .btn { flex: 1 1 140px; }
+.investigation > .btn.plain { margin-top: 10px; }
+.zone { border-top: .5px solid var(--line); margin-top: 6px; }
+.trio { display: flex; gap: 6px; } .trio input { width: 64px; }

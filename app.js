@@ -249,7 +249,8 @@ function progressCard() {
 function viewToday() {
   const rec = recNow();
   const st = A.todayStatus(S, rec);
-  const main = [hero(st, rec), st.kind === 'setup' ? '' : learnedToday(), programCard(st, rec)];
+  const inv = st.kind === 'setup' ? null : invNow();
+  const main = [hero(st, rec), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
@@ -351,11 +352,12 @@ function aiReportHtml(rp) {
   const disc = a.discoveries.map((d) => `<li class="${d.type === 'hypothesis' ? 'hyp' : ''}"><b>${esc(d.title)}</b><span class="kind-tag">${d.type === 'hypothesis' ? 'Hypothesis — not confirmed' : 'Observation'}</span><span>${esc(d.detail)}</span>${evIds(d.evidence)}</li>`).join('');
   const recs = a.recommendations.map((r, i) => `<li><b>${i === 0 ? 'Most likely to matter: ' : ''}${esc(r.action)}</b><span>${esc(r.why)}</span>${r.verify ? `<span><i>How to confirm:</i> ${esc(r.verify)}</span>` : ''}<span><i>${CONF[r.confidence] || 'Confidence not stated'}.</i> ${r.thermostat ? 'Involves your thermostat settings.' : 'No thermostat change needed.'}</span>${evIds(r.evidence)}</li>`).join('');
   const ev = rp.evidence.map((e) => `<li><b>${esc(e.id)} · ${esc(e.tool.replace(/_/g, ' '))}${e.args && Object.keys(e.args).length ? ` (${esc(Object.values(e.args).join(', '))})` : ''}</b><code>${esc(JSON.stringify(e.result).slice(0, 600))}</code></li>`).join('');
-  const rej = (rp.rejected || []).map((x) => `<li>${esc(x.title || x.kind)} — ${esc(x.why.join('; '))}</li>`).join('');
+  const rej = (rp.rejected || []).map((x) => `<li><b>${esc(x.title || x.kind)}</b> — removed because ${esc(x.why.join('; '))}${x.text ? `<br><small>It said: “${esc(x.text)}”</small>` : ''}</li>`).join('');
   return `${rp.decision ? decisionHtml(rp.decision, true) + '<hr>' : ''}${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
     ${(a.explanations || []).length ? `<p class="card-label">Which explanation fits best (AI)</p><ul class="findings">${[...a.explanations, ...((rp.decision?.explanations || []).filter((x) => !a.explanations.some((e) => e.id === x.id)).map((x) => ({ title: x.title, verdict: x.verdict, assessment: 'not assessed by the AI', reasoning: x.why, evidence: [] })))].map((e) => `<li class="${e.assessment === 'most likely' ? 'good' : ''}"><b>${esc(e.title)}</b><span class="kind-tag">${esc(e.assessment)} · tests: ${esc(e.verdict)}</span><span>${esc(e.reasoning)}</span>${evIds(e.evidence)}</li>`).join('')}</ul>` : ''}
     ${disc ? `<p class="card-label">Discoveries</p><ul class="findings">${disc}</ul>` : '<p class="fine">No discoveries passed the evidence check.</p>'}
     ${recs ? `<p class="card-label">Recommended</p><ul class="findings actions">${recs}</ul>` : '<p class="fine">No recommendation passed the evidence check — nothing clearly worth changing.</p>'}
+    ${a.next_question && A.QUESTIONS[a.next_question] ? `<p class="fine">The AI suggests answering: “${esc(A.QUESTIONS[a.next_question].text({ since: rp.decision?.tests?.from || '', day: rp.decision?.tests?.day, part: rp.decision?.tests?.part, bigDay: rp.decision?.tests?.biggest_day?.date }))}” — <a href="#investigate">answer it on the Investigation page</a>.</p>` : ''}
     ${a.next_checks.length ? `<p class="card-label">What to check next</p><ul class="bullets">${a.next_checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
     <p class="fine">Analyzed by <b>${esc(rp.model)}</b>, ${esc(rp.runtime || 'on your Mac')}, ${esc(fmtNY(Date.parse(rp.created)))} · ${num(rp.data?.full_days)} days of data (${esc(rp.data?.from || '—')} – ${esc(rp.data?.to || '—')}) · ${num((s.ms || 0) / 1000)} s${rp.imported ? ' · imported from a file' : ''}. Every number above was checked against the evidence; ${rej ? `${(rp.rejected || []).length} claim${rp.rejected.length === 1 ? ' was' : 's were'} removed because the evidence didn’t support ${rp.rejected.length === 1 ? 'it' : 'them'}.` : 'nothing had to be removed.'}</p>
     ${disclosure('ai-evidence', `Evidence the AI used (${rp.evidence.length})`, `<p class="fine">Calculated on your device by the app’s tested functions; the AI only reads these results.</p><ul class="evidence">${ev}</ul>`)}
@@ -394,6 +396,83 @@ async function runAI(deep = true) {
 }
 if (LOCAL) fetch('/api/companion').then((r) => (r.ok ? r.json() : null)).then((j) => { companion = j; render(); }).catch(() => {});
 
+// ---------- Investigation (runs on this device; answers and actions stay here) ----------
+
+const invNow = () => A.investigation({ state: S, temps: allTemps() });
+const STATUS_CLASS = { likely: 'good', fits: 'good', possible: '', open: '', conflict: 'warn', unlikely: 'out', out: 'out' };
+function questionHtml(inv, q, current = null) {
+  return `<div class="ask"><p class="card-label">One question that could help</p><p><b>${esc(q.text)}</b></p><p class="fine">${esc(q.why)}</p>
+    <div class="answers">${q.options.map(([v, l]) => `<button class="btn ${current === v ? 'primary' : 'secondary'}" data-act="answer" data-q="${q.id}" data-v="${v}" data-key="${esc(inv.key)}">${esc(l)}</button>`).join('')}</div></div>`;
+}
+/** Compact card for Today; the full page is #investigate. */
+function investigationCard(inv) {
+  if (!inv?.hypotheses?.length) return '';
+  const rec = inv.recommendation;
+  return `<section class="card investigation"><p class="card-label"><i class="dot"></i>We found something worth investigating</p><h2>${esc(inv.headline)}</h2>
+    <p class="fine">${esc(inv.known[0] || '')}</p>
+    <p class="card-label">What might explain it</p><ul class="hyps">${inv.hypotheses.map((h) => `<li class="${STATUS_CLASS[h.status]}"><span>${esc(h.title)}</span><em>${esc(h.label)}</em></li>`).join('')}</ul>
+    ${inv.question ? questionHtml(inv, inv.question) : ''}
+    ${rec ? `<div class="next"><p class="card-label">What you can do now</p><b>${esc(rec.title)}</b><p class="fine">${esc(rec.expected)}</p></div>` : ''}
+    <a class="btn plain" href="#investigate">Open the investigation ›</a></section>`;
+}
+/** After the move-in date: one line per thermostat zone. Before it, nothing (never applied to earlier history). */
+function zonesCard() {
+  const plans = A.zonePlans(S);
+  if (!plans) return '';
+  return `<section class="card"><p class="card-label">Your thermostats</p><ul class="bullets">${plans.map(({ zone, rec }) => {
+    const c = rec.current[0];
+    return `<li><b>${esc(zone.label)}</b>${zone.use ? ` (${esc(zone.use)})` : ''}: ${c ? `${c.temp}° ${c.mode} now, next ${C.fmtMin(c.next.start)} → ${c.next.temp}°` : zone.availability === 'unknown' ? 'set its heating/cooling season in Settings' : 'no heating or cooling right now'}${zone.metered === 'no' ? ' · not on your meter' : ''}</li>`;
+  }).join('')}</ul><p class="fine">Recommendations only — the app can’t see or change either thermostat.</p></section>`;
+}
+const ZHV = [['unknown', 'Not sure'], ['heat_pump', 'Heat pump'], ['electric_resistance', 'Electric resistance'], ['fan_coil', 'Fan coil (building water)'], ['gas_or_boiler', 'Gas furnace / boiler'], ['other', 'Other']];
+const ZSEASON = [['unknown', 'Not sure'], ['heat_available', 'Heating'], ['cool_available', 'Cooling'], ['fan_only', 'Fan only']];
+const ZMET = [['unknown', 'Not sure'], ['yes', 'Yes'], ['partial', 'Partly (fan only)'], ['no', 'No — building pays']];
+const zsel = (z, f, opts) => `<select data-zone="${esc(z.id)}" data-f="${f}">${opts.map(([v, l]) => `<option value="${v}" ${z[f] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+const znum = (z, f) => `<input type="number" inputmode="numeric" min="40" max="95" data-zone="${esc(z.id)}" data-f="${f}" value="${getPath(z, f)}">`;
+function zonesGroup() {
+  const zs = S.zones || [];
+  const ed = (z) => `<div class="zone"><label class="item"><span>Name</span><input data-zone="${esc(z.id)}" data-f="label" value="${esc(z.label)}" maxlength="40"></label>
+    <label class="item"><span>Rooms it serves</span><input data-zone="${esc(z.id)}" data-f="use" value="${esc(z.use)}" maxlength="60" placeholder="e.g. bedrooms"></label>
+    <label class="item"><span>Equipment</span>${zsel(z, 'hvacType', ZHV)}</label><label class="item"><span>Available now</span>${zsel(z, 'availability', ZSEASON)}</label>
+    <label class="item"><span>On your meter?</span>${zsel(z, 'metered', ZMET)}</label>
+    <div class="item"><span>Heat: home / away / sleep</span><div class="trio">${znum(z, 'heat.home')}${znum(z, 'heat.away')}${znum(z, 'heat.sleep')}</div></div>
+    <div class="item"><span>Cool: home / away / sleep</span><div class="trio">${znum(z, 'cool.home')}${znum(z, 'cool.away')}${znum(z, 'cool.sleep')}</div></div>
+    <div class="item"><button class="btn plain" data-act="zone-remove" data-id="${esc(z.id)}">Remove</button></div></div>`;
+  return group('Next apartment (two thermostats)', 'Used only from your move-in date and never applied to your current apartment’s history. Two systems don’t necessarily mean twice the energy; the app won’t suggest switching either off without knowing what it serves.',
+    `<label class="item"><span>Move-in date</span><input type="date" data-zone="moveIn" value="${esc(S.moveIn || '')}"></label>${zs.map(ed).join('')}${zs.length < 4 ? '<div class="item"><button class="btn secondary" data-act="zone-add">Add a thermostat</button></div>' : ''}`);
+}
+function viewInvestigate() {
+  const inv = invNow();
+  const head = `${back('insights', 'Insights')}${pagehead('Investigation', inv?.title ? esc(inv.title) : '')}`;
+  if (!inv) return `${head}<section class="card"><p>Import your Delmarva file to start.</p>${importButton()}</section>`;
+  if (!inv.hypotheses?.length) return `${head}<section class="card"><h2>${esc(inv.title)}</h2><p>${esc(inv.headline)}</p></section>`;
+  const reask = UI.reask && A.QUESTIONS[UI.reask] ? { id: UI.reask, text: A.QUESTIONS[UI.reask].text({ since: inv.since, day: inv.tests?.day, part: inv.tests?.part, bigDay: inv.tests?.biggest_day?.date }), why: A.QUESTIONS[UI.reask].why, options: A.QUESTIONS[UI.reask].options } : null;
+  const att = inv.attribution ? `<div class="table-wrap"><table><thead><tr><th>When</th><th class="t">Extra kWh a day</th><th class="t">Share</th></tr></thead><tbody>${inv.attribution.map((a) => `<tr><td>${esc(a.window)}</td><td class="t">${num(a.kwh, 1)}</td><td class="t">${a.share}%</td></tr>`).join('')}</tbody></table></div>` : '';
+  const hyps = inv.hypotheses.map((h) => `<li class="${STATUS_CLASS[h.status]}"><b>${esc(h.title)}</b><span class="kind-tag">${esc(h.label)}</span>
+    ${h.for.length ? `<span><i>Fits:</i> ${h.for.map(esc).join(' · ')}</span>` : ''}${h.against.length ? `<span><i>Against:</i> ${h.against.map(esc).join(' · ')}</span>` : ''}
+    ${h.status !== 'out' ? `<span><i>How to check:</i> ${esc(h.check)}</span>` : ''}</li>`).join('');
+  const answers = inv.answered.length ? `<ul class="bullets">${inv.answered.map((a) => `<li>${esc(a.text)} — <b>${esc(a.label)}</b>${a.source === 'settings' ? ' (from Settings)' : a.at ? ` (${esc(shortDate(a.at))}${a.corrected ? ', corrected' : ''})` : ''} <button class="link" data-act="reask" data-q="${a.q}">Change</button></li>`).join('')}</ul>` : '<p class="fine">No answers yet.</p>';
+  const rec = inv.recommendation;
+  const tracked = (S.actions || []).find((x) => rec && x.id === `${inv.key}:${rec.hypothesis}`);
+  const recHtml = rec ? `<section class="card"><p class="card-label">Recommended</p><h2>${esc(rec.title)}</h2>
+    <p><i>The problem:</i> ${esc(rec.problem)}</p><p><i>Why it could help:</i> it addresses the explanation that best fits so far — ${esc(inv.hypotheses.find((h) => h.id === rec.hypothesis)?.title.toLowerCase() || '')}.</p>
+    ${rec.detail ? `<p>${esc(rec.detail)}</p>` : ''}<p><i>What to expect:</i> ${esc(rec.expected)}${esc(rec.note || '')}</p><p class="fine"><i>How we’ll know:</i> ${esc(rec.verify)}</p>
+    ${tracked ? '<p class="fine">You’re tracking this below.</p>' : `<button class="btn primary" data-act="track" data-id="${esc(`${inv.key}:${rec.hypothesis}`)}" data-key="${esc(inv.key)}" data-title="${esc(rec.title)}" data-hours="${rec.hours ? rec.hours.join('-') : ''}">I’ll try this</button>`}</section>` : '';
+  const acts = (S.actions || []).slice().reverse().map((a) => {
+    const ev = A.evaluateAction({ state: S, temps: allTemps(), action: a });
+    return `<li><b>${esc(a.title)}</b><div class="row2"><select data-action-status="${esc(a.id)}">${Object.entries(A.ACTION_STATUS).map(([k, l]) => `<option value="${k}" ${a.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select><label class="field">Started on<input type="date" data-action-start="${esc(a.id)}" value="${esc(a.start)}"></label></div>
+      <span class="fine">${esc(ev.label)}${ev.diff != null ? ` (${ev.diff < 0 ? '' : '+'}${num(ev.diff, 1)} kWh a day ± ${num(ev.unc, 1)}; ${esc(ev.method)})` : ''}</span></li>`;
+  }).join('');
+  return `${head}
+    <section class="card investigation"><h2>${esc(inv.headline)}</h2><p class="card-label">What we know (measured)</p><ul class="bullets">${inv.known.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>${att}</section>
+    <h2 class="section-title">What might explain it</h2><section class="card"><ul class="findings explain">${hyps}</ul><p class="fine">${esc(inv.conclusion)} Whole-home readings can rule explanations in or out; they can’t name a specific appliance.</p></section>
+    ${reask || inv.question ? `<section class="card">${questionHtml(inv, reask || inv.question, reask ? inv.answered.find((a) => a.q === reask.id)?.value : null)}</section>` : ''}
+    ${recHtml}
+    <h2 class="section-title">Your answers</h2><section class="card">${answers}</section>
+    ${acts ? `<h2 class="section-title">Things you’re trying</h2><section class="card"><ul class="findings actions">${acts}</ul><p class="fine">Results compare the days after you started with the 4 weeks before. “Consistent with an improvement” is not proof — other changes at home also count.</p></section>` : ''}
+    ${LOCAL ? '<p class="fine center"><a href="#insights">Ask the AI on this Mac to weigh these explanations ›</a></p>' : ''}`;
+}
+
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
 
 function viewInsights() {
@@ -409,6 +488,8 @@ function viewInsights() {
     return out.join('');
   }
   const r = report(), dq = A.dataQuality(S.usage, allTemps(), todayIso());
+  const inv = invNow();
+  if (inv?.hypotheses?.length) out.push(`<a class="card investigation-link" href="#investigate"><p class="card-label"><i class="dot"></i>Active investigation</p><h2>${esc(inv.headline)}</h2><p>${esc(inv.conclusion)}</p></a>`);
   if (lastImport) out.push(`<section class="card good imported"><p class="card-label"><i class="dot"></i>Import complete</p><p>${esc(lastImport)}</p></section>`);
   out.push(learnedSection(r));
   out.push(actionsCard(r));
@@ -569,6 +650,7 @@ function viewSettings() {
     ${routineGroup('weekday')}${routineGroup('weekend')}`;
   const right = `
     ${group('Electricity data', 'Used only on this device to measure what’s working.', `<div class="item"><span>Latest data</span><span class="value">${days.length ? `${esc(dayLabel(days[days.length - 1].date))} · ${days.length} days` : 'None yet'}</span></div><div class="item col">${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}<details class="inline"><summary>How to get the file from Delmarva</summary>${HOW_TO_DOWNLOAD}</details></div>${days.length ? '<button class="item danger" data-act="clear-usage">Delete electricity data</button>' : ''}`)}
+    ${zonesGroup()}
     ${group('Privacy and backup', 'Your settings and electricity data stay on this device. The app only downloads public weather for Wilmington; nothing personal is sent anywhere.', `<div class="item col"><div class="row2"><button class="btn primary" data-act="export">Save backup</button><label class="btn secondary file">Restore backup<input type="file" id="backup-file" accept=".json,application/json"></label></div><p class="fine">A backup file lets you restore everything later or move to a new phone.</p></div>`)}
     ${disclosure('advanced', 'Advanced', advanced)}
     ${IOS && !STANDALONE ? '<p class="fine center">Install: tap Share → Add to Home Screen. The installed app keeps its own data, separate from Safari.</p>' : ''}`;
@@ -669,9 +751,9 @@ function viewProgram() {
 
 // ---------- rendering ----------
 
-const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule };
-const PARENT = { weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
-const TITLES = { setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
+const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule, investigate: viewInvestigate };
+const PARENT = { investigate: 'insights', weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
+const TITLES = { investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
 const route = () => { const h = location.hash.slice(1); return ROUTES[h] ? h : 'today'; };
 
 function render() {
@@ -837,6 +919,36 @@ const ACTIONS = {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
+  answer(el) {
+    const q = el.dataset.q, v = el.dataset.v, def = A.QUESTIONS[q];
+    if (!def || !def.options.some(([k]) => k === v)) return;
+    const inv = invNow();
+    S.answers = [...(S.answers || []), { q, key: def.scope === 'home' ? '' : el.dataset.key, value: v, at: todayIso(), since: inv?.since || '' }].slice(-200);
+    if (q === 'hvac_meter' && v !== 'unknown') S.profile.hvacMetered = v;
+    if (q === 'heat_on' && v === 'yes') S.profile.buildingMode = 'heat_available';
+    UI.reask = undefined;
+    save();
+    toast(q === 'heat_on' && v === 'yes' ? 'Thanks — season set to heating, and the investigation is updated.' : 'Thanks — the investigation is updated.');
+    render();
+  },
+  reask(el) { UI.reask = el.dataset.q; render(); window.scrollTo(0, 0); },
+  track(el) {
+    const id = el.dataset.id;
+    if ((S.actions || []).some((a) => a.id === id)) return;
+    const h = el.dataset.hours ? el.dataset.hours.split('-').map(Number) : null;
+    S.actions = [...(S.actions || []), { id, key: el.dataset.key, title: el.dataset.title, status: 'planning', at: todayIso(), start: '', hours: h }];
+    save();
+    toast('Added to “Things you’re trying”. Mark it started when you begin.');
+    render();
+  },
+  'zone-add'() {
+    const n = (S.zones || []).length;
+    if (n >= 4) return;
+    const dc = C.defaultState().profile.comfort;
+    S.zones = [...(S.zones || []), { id: `z${Date.now().toString(36)}`, label: `Thermostat ${n + 1}`, hvacType: 'unknown', availability: 'unknown', use: '', metered: 'unknown', heat: { ...dc.heat }, cool: { ...dc.cool } }];
+    save(); render();
+  },
+  'zone-remove'(el) { if (!confirm('Remove this thermostat zone?')) return; S.zones = S.zones.filter((z) => z.id !== el.dataset.id); save(); render(); },
   'mark-programmed'() {
     if (!confirm('Mark the current recommended schedule as programmed on your thermostat?')) return;
     markProgrammed();
@@ -1000,6 +1112,24 @@ document.addEventListener('change', async (e) => {
       toast(`Couldn’t restore: ${err.message}`, true);
     }
     return;
+  }
+  if (el.dataset.actionStatus || el.dataset.actionStart) {
+    const a = (S.actions || []).find((x) => x.id === (el.dataset.actionStatus || el.dataset.actionStart));
+    if (!a) return;
+    if (el.dataset.actionStatus && A.ACTION_STATUS[el.value]) { a.status = el.value; if (el.value === 'started' && !a.start) a.start = todayIso(); }
+    if (el.dataset.actionStart) a.start = /^\d{4}-\d{2}-\d{2}$/.test(el.value) ? el.value : '';
+    save(); render(); return;
+  }
+  if (el.dataset.zone) {
+    if (el.dataset.zone === 'moveIn') S.moveIn = /^\d{4}-\d{2}-\d{2}$/.test(el.value) ? el.value : '';
+    else {
+      const z = (S.zones || []).find((x) => x.id === el.dataset.zone);
+      if (!z) return;
+      const path = el.dataset.f.split('.'), val = el.type === 'number' ? Number(el.value) : el.value.slice(0, 60);
+      if (el.type === 'number' && !(val >= 40 && val <= 95)) return toast('Use a temperature between 40 and 95°F.', true);
+      if (path.length === 2) z[path[0]][path[1]] = val; else z[path[0]] = val;
+    }
+    save(); noteSaved('next-apartment settings'); return;
   }
   if (el.dataset.home) return homeAllDay(el);
   const k = el.dataset.k;
