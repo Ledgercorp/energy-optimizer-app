@@ -37,7 +37,10 @@ export function migrate(raw) {
     use: str(z.use, 60), metered: MET.includes(z.metered) ? z.metered : 'unknown', heat: temp(z.heat, dc.heat), cool: temp(z.cool, dc.cool) }));
   s.moveIn = isDate(raw?.moveIn) ? raw.moveIn : '';
   s.bills = cleanBills(raw?.bills);
-  s.projection = cleanProjection(raw?.projection);
+  const legacy = raw?.projection && isMoney(+raw.projection.amount) && isIso(raw.projection.periodEnd) ? [{ amount: +raw.projection.amount, periodEnd: raw.projection.periodEnd, shownOn: raw.projection.asOf, source: 'entered by you' }] : [];
+  s.projections = cleanProjections([...arr(raw?.projections), ...legacy.filter((l) => !arr(raw?.projections).some((p) => p.amount === l.amount && p.periodEnd === l.periodEnd))]);
+  s.projection = null; // superseded by `projections`; kept so older code and backups still load
+  if (isMoney(+raw?.projection?.amount) && !isIso(raw?.projection?.periodEnd)) s.projection = cleanProjection(raw.projection);
   s.experiments = cleanExperiments(raw?.experiments);
   const th = cleanThermostat(raw?.profile?.thermostat);
   if (th) s.profile.thermostat = th; else delete s.profile.thermostat;
@@ -1532,6 +1535,8 @@ export function planMerge(local, incoming) {
   }
   const le = new Map((local.experiments || []).map((e) => [e.id, e]));
   for (const e of incoming.experiments || []) { const l = le.get(e.id); if (!l) inc('experiments'); else if (JSON.stringify(l) === JSON.stringify(e)) same('experiments'); else plan.conflicts.push({ id: `experiment:${e.id}`, label: `Experiment “${e.title}”`, detail: `here: ${l.end ? `ended ${l.end}` : 'running'}${l.decision ? `, ${l.decision}` : ''}; backup: ${e.end ? `ended ${e.end}` : 'running'}${e.decision ? `, ${e.decision}` : ''}`, local: 'Keep this device’s', incoming: 'Use the backup’s' }); }
+  const lp = new Set((local.projections || []).map((p) => p.id));
+  for (const p of incoming.projections || []) lp.has(p.id) ? same('projections') : inc('projections');
   const bk = (b) => `${b.end}|${b.amount}`, lb = new Set((local.bills || []).map(bk));
   for (const b of incoming.bills || []) lb.has(bk(b)) ? same('statements') : inc('statements');
   const hk = (h) => `${h.date}|${h.fingerprint}`, lh = new Set((local.programmedHistory || []).map(hk));
@@ -1593,6 +1598,8 @@ export function applyMerge(local, incoming, choices = {}, plan = planMerge(local
   const billK = (b) => `${b.end}|${b.amount}`, seenB = new Set((out.bills || []).map(billK));
   out.bills = cleanBills([...(out.bills || []), ...(incoming.bills || []).filter((b) => !seenB.has(billK(b)))]);
   if (!out.projection && incoming.projection) out.projection = incoming.projection;
+  const pHave = new Set((out.projections || []).map((p) => p.id));
+  out.projections = cleanProjections([...(out.projections || []), ...(incoming.projections || []).filter((p) => !pHave.has(p.id))]);
   const zById = new Map(out.zones.map((z) => [z.id, z]));
   for (const z of incoming.zones || []) if (!zById.has(z.id) || pick(`zone:${z.id}`) === 'incoming') zById.set(z.id, z);
   out.zones = [...zById.values()].slice(0, 4);
@@ -1639,13 +1646,14 @@ function validateHousehold(raw) {
   const notes = (Array.isArray(raw.notes) ? raw.notes : []).filter((t) => typeof t === 'string' && t.trim()).slice(0, 20).map((t) => t.trim().slice(0, 300));
   const ub = raw.usualBill && Number.isFinite(+raw.usualBill.low) && Number.isFinite(+raw.usualBill.high) && +raw.usualBill.low > 0 && +raw.usualBill.high >= +raw.usualBill.low ? { low: +raw.usualBill.low, high: +raw.usualBill.high } : null;
   const base = { id: raw.id.slice(0, 60), created: String(raw.created || '').slice(0, 30), note: String(raw.note || '').slice(0, 300), routine: { mode: 'days', days: Object.fromEntries(C.DOW.map((d) => [d, { wake: days[d].wake, leave: days[d].leave || '', back: days[d].back || '', sleep: days[d].sleep }])) }, buildingMode: raw.buildingMode || null, answers };
-  return { ...base, notes, usualBill: ub, thermostat: cleanThermostat(raw.thermostat) };
+  const pj = raw.projection && cleanProjections([{ ...raw.projection, source: raw.projection.source || 'Delmarva account screenshot, read by you', enteredAt: '' }])[0];
+  return { ...base, notes, usualBill: ub, thermostat: cleanThermostat(raw.thermostat), projection: pj || null };
 }
 const dayLine = (r) => (r.leave && r.back ? `away ${C.fmtMin(C.toMin(r.leave))}–${C.fmtMin(C.toMin(r.back))}` : 'home all day') + `, up ${C.fmtMin(C.toMin(r.wake))}, bed ${C.fmtMin(C.toMin(r.sleep))}`;
 /** Line-by-line preview: each day now → after, the building season, and the answers to be recorded. */
 export function previewHousehold(state, update) {
   const lines = C.DOW.map((d) => { const now = dayLine(C.routineFor(state.profile.routine, d)), next = dayLine(update.routine.days[d]); return { day: C.DAY_NAME[d], now, next, changed: now !== next }; });
-  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, notes: update.notes || [], usualBill: update.usualBill || null, thermostat: update.thermostat || null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change', daytime_device: 'Anything new running for hours in the day', new_appliance: 'Something new running day and night', cooling_longer: 'Cooling running longer than usual', fan_mode: 'Thermostat fan setting' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
+  return { lines, season: update.buildingMode && update.buildingMode !== state.profile.buildingMode ? { now: state.profile.buildingMode, next: update.buildingMode } : null, notes: update.notes || [], usualBill: update.usualBill || null, thermostat: update.thermostat || null, projection: update.projection || null, answers: update.answers.map((a) => `${{ heat_on: 'Building switched to heating', home_more: 'Home more than usual since the change', daytime_device: 'Anything new running for hours in the day', new_appliance: 'Something new running day and night', cooling_longer: 'Cooling running longer than usual', fan_mode: 'Thermostat fan setting' }[a.q] || QUESTIONS[a.q]?.short || a.q}: ${optLabel(a.q, a.value)}`), applied: (state.appliedUpdates || []).includes(update.id) };
 }
 /** New state with the confirmed facts applied. Investigation-specific answers are tied to the investigation open right now. */
 export function applyHousehold(state, update, { investigationKey = '', today = '' } = {}) {
@@ -1661,6 +1669,10 @@ export function applyHousehold(state, update, { investigationKey = '', today = '
   out.notes = [...(out.notes || []), ...(update.notes || []).filter((t) => !have.has(t)).map((text) => ({ text, at: today }))];
   if (update.usualBill) out.profile.usualBill = { ...update.usualBill, source: 'you' };
   if (update.thermostat) out.profile.thermostat = { ...update.thermostat, confirmed: update.thermostat.confirmed || today };
+  if (update.projection) {
+    const snap = cleanProjections([{ ...update.projection, enteredAt: today, id: undefined }])[0], have = (out.projections || []).some((p) => p.amount === snap.amount && p.periodEnd === snap.periodEnd && p.soFar === snap.soFar);
+    if (snap && !have) { const f = forecastBill({ state: out, temps: {}, now: Date.parse(`${today}T12:00:00Z`) }); out.projections = cleanProjections([...(out.projections || []), { ...snap, app: f.available ? { mid: f.mid, low: f.low, high: f.high, method: f.method, through: f.readingsEnd } : null }]); }
+  }
   out.appliedUpdates = [...new Set([...(out.appliedUpdates || []), update.id])];
   return migrate(out);
 }
@@ -1671,6 +1683,7 @@ export function verifyHousehold(saved, update) {
   if (update.buildingMode && saved.profile.buildingMode !== update.buildingMode) bad.push('buildingMode');
   if (update.usualBill && (saved.profile.usualBill?.low !== update.usualBill.low || saved.profile.usualBill?.high !== update.usualBill.high)) bad.push('usual bill');
   if ((update.notes || []).some((t) => !(saved.notes || []).some((n) => n.text === t))) bad.push('notes');
+  if (update.projection && !(saved.projections || []).some((p) => p.amount === update.projection.amount && p.periodEnd === update.projection.periodEnd && p.soFar === update.projection.soFar)) bad.push('projection');
   if (update.thermostat && JSON.stringify(cleanThermostat(saved.profile.thermostat)) !== JSON.stringify(cleanThermostat({ ...update.thermostat, confirmed: saved.profile.thermostat?.confirmed }))) bad.push('thermostat');
   return { ok: !bad.length, bad };
 }
@@ -2062,7 +2075,7 @@ export function billView({ state, temps = {}, now = Date.now() }) {
   });
   if (!bills.length) missing.push('Your Delmarva statements: service dates, billed days, kWh, current charges, and if shown supply, delivery, fixed charges, taxes and credits. Without them the app can’t say which dates a bill covers or what is fixed vs. usage-driven.');
   else if (statements.some((s) => !s.covered)) missing.push('Start dates (or readings for every day) for some statements, so they can’t be reconciled.');
-  const proj = cleanProjection(state.projection);
+  const proj = currentProjection(state), projections = cleanProjections(state.projections);
   if (!proj) missing.push('Delmarva’s current projection, if you want it shown next to the measured numbers. The app never presents its own estimate as Delmarva’s.');
 
   // Why the latest statement differs from the one before (only from entered figures).
@@ -2074,28 +2087,14 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     compare.typical_cost_per_day = others.length >= 2 ? r2(median(others.map((s) => s.cost_per_day))) : null;
   }
 
-  // The app's own estimate for the period after the last statement: only with a complete last statement and readings since.
-  let estimate = null;
+  // The independent forecast for the current period, from actual service dates and the readings the app has.
+  const fcst = forecastBill({ state, temps, now });
+  const estimate = fcst.available ? { low: fcst.low, high: fcst.high, mid: fcst.mid, rough: false, pointOk: fcst.pointOk, method: fcst.method_text, uncertainty: fcst.uncertainty } : null;
+  if (!fcst.available && days.length && bills.length) missing.push(`No independent forecast yet: ${fcst.reason}`);
+  if (fcst.available && statements.length && !statements.some((x) => x.supply != null || x.fixed != null)) missing.push('An itemised statement (supply, delivery, customer charge, taxes) would separate price from usage; the billing export only gives totals.');
+  const gap = fcst.available && proj ? explainForecastGap(fcst, proj) : null;
+  const accuracy = forecastAccuracy(state), normal = proj ? billNormal(statements, proj.amount, state.profile.usualBill || null) : null;
   const last = statements[statements.length - 1];
-  if (last && last.billed_days && last.kwh) {
-    const since = days.filter((d) => d.date > last.end);
-    const price = last.variable_cents != null ? last.variable_cents / 100 : null;
-    if (since.length >= 7 && price != null) {
-      const kd = avg(since.map((d) => d.kwh)), sdd = sd(since.map((d) => d.kwh)) / Math.sqrt(since.length);
-      const len = last.billed_days, fixed = last.fixed ?? 0, taxesShare = last.taxes != null && last.amount ? last.taxes / last.amount : 0;
-      const at = (k) => (fixed + k * len * price) * (1 + (last.taxes != null ? taxesShare : 0)) - (last.credits ?? 0) * 0;
-      estimate = { low: r2(at(Math.max(0, kd - 2 * sdd))), high: r2(at(kd + 2 * sdd)), kwh_per_day: r1(kd), days_so_far: since.length, period_days: len, from: isoAdd(last.end, 0),
-        method: `Your ${since.length} days of readings since ${md(last.end)} (${fmt(kd, 1)} kWh a day) × ${len} days (the length of your last bill) × your last bill’s energy price (${fmt(last.variable_cents, 2)}¢), plus its fixed charges${last.taxes != null ? ' and tax rate' : ''}. Assumes prices and the period length don’t change and no credits apply.` };
-    } else if (since.length >= 7) {
-      const recent = statements.filter((x) => x.kwh && x.billed_days).slice(-4), cents = recent.map((x) => x.amount / x.kwh), lens = recent.map((x) => x.billed_days);
-      const kd = avg(since.map((d) => d.kwh)), sdd = sd(since.map((d) => d.kwh)) / Math.sqrt(since.length);
-      const L = Math.round(median(lens)), cLo = Math.min(...cents), cHi = Math.max(...cents), cMid = median(cents);
-      const lo = Math.max(0, kd - 2 * sdd) * (L - 1) * cLo, hi = (kd + 2 * sdd) * (L + 1) * cHi, mid = kd * L * cMid;
-      estimate = { low: r2(lo), high: r2(hi), mid: r2(mid), kwh_per_day: r1(kd), days_so_far: since.length, period_days: [L - 1, L + 1], from: isoAdd(last.end, 1), rough: true,
-        method: `Rough: ${fmt(kd, 1)} kWh a day (your ${since.length} days of readings since ${md(last.end)}) × about ${L} days (your usual bill length, ±1) × ${fmt(cMid * 100, 1)}¢ per kWh (your recent bills’ average, ${fmt(cLo * 100, 1)}–${fmt(cHi * 100, 1)}¢, which already includes fixed charges and taxes) ≈ ${money(mid)}. The range allows for how your use varies day to day. The period’s real end date, the rest of its readings and Delmarva’s current prices aren’t known.` };
-      missing.push('An itemised statement (supply, delivery, customer charge, taxes) would separate price from usage; the billing export only gives totals.');
-    }
-  }
 
   // Lines, source by source.
   if (compare) {
@@ -2110,10 +2109,9 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     const gaps = covered.map((s) => s.beyond_readings).filter((x) => x != null);
     lines.push({ kind: 'reconciled', text: gaps.length >= 2 && Math.max(...gaps) - Math.min(...gaps) >= 3 ? `That gap varied from ${money(Math.min(...gaps))} to ${money(Math.max(...gaps))} between bills, so it isn’t one fixed monthly fee. It may be taxes, fees, charges priced differently from the hourly costs, or credits — the export doesn’t itemise it, so the app doesn’t assume which.` : 'That gap may be fixed charges, taxes, fees, a different price or credits — the export doesn’t itemise it, so the app doesn’t assume which.' });
   }
-  if (estimate) lines.push({ kind: 'estimate', text: `App estimate for the bill after ${md(last.end)}: ${estimate.mid != null ? `about ${money(estimate.mid)} (` : ''}${money(estimate.low)}–${money(estimate.high)}${estimate.mid != null ? ')' : ''}. ${estimate.method}` });
   const story = billingStory(statements, days);
   if (story) lines.unshift(...story.map((text) => ({ kind: 'statement', text })));
-  if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection, entered by you: ${money(proj.amount)}${proj.asOf ? ` (as of ${md(proj.asOf)})` : ''}. It is Delmarva’s number, not the app’s.${estimate ? ` The app’s estimate is ${money(estimate.low)}–${money(estimate.high)}${proj.amount < estimate.low || proj.amount > estimate.high ? ' — they differ; Delmarva may expect different days, prices or usage' : ''}.` : ''}` });
+  if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection, entered by you${proj.shownOn ? ` (seen ${md(proj.shownOn)})` : ''}: ${money(proj.amount)} for ${proj.periodStart ? `${md(proj.periodStart)}–` : 'the period ending '}${md(proj.periodEnd)}. It is Delmarva’s number — a projection, not a bill, and the utility’s own update time isn’t known.` });
   if (thirty) {
     const t = thirty, near = Math.abs(t.latest_vs_typical_pct) < 8;
     lines.push({ kind: 'measured', text: `Measured: any 30 days in your readings used ${fmt(t.low_kwh)}–${fmt(t.high_kwh)} kWh (typical ${fmt(t.typical_kwh)}). The latest 30 days (${md(t.latest.from)}–${md(t.latest.to)}): ${fmt(t.latest.kwh)} kWh — ${near ? 'about typical' : `${fmt(Math.abs(t.latest_vs_typical_pct))}% ${t.latest_vs_typical_pct > 0 ? 'above' : 'below'} typical`}.` });
@@ -2126,7 +2124,7 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     if (c.interval_cost != null && p.interval_cost != null) lines.push({ kind: 'estimate', text: `Estimate from the file’s per-hour costs: ${money(c.interval_cost)} vs ${money(p.interval_cost)}. This is not a bill: it leaves out fixed charges, taxes and credits, and the file’s own totals aren’t verified against a statement.` });
   }
   const usual = state.profile.usualBill && Number.isFinite(state.profile.usualBill.low) ? state.profile.usualBill : null;
-  return { months: monthRows, stretches, thirty, statements, projection: proj, estimate, compare, lines, missing, hasStatements: bills.length > 0, usual, price: priceStructure(state) };
+  return { months: monthRows, stretches, thirty, statements, projection: proj, estimate, forecast: fcst, gap, accuracy, normal, projections, compare, lines, missing, hasStatements: bills.length > 0, usual, price: priceStructure(state) };
 }
 const money = (x) => `$${fmt(x, 2)}`;
 
@@ -2393,4 +2391,142 @@ function billingStory(statements, days) {
     }
   }
   return out;
+}
+
+// ================= v20: utility projections, the independent bill forecast, and how both are checked =================
+
+/**
+ * Utility projection snapshots the household entered (read from the Delmarva account). Kept as a history: a new reading never replaces an old
+ * one, and none of them is ever a bill. `shownOn` is the date the household saw it (empty when not stated); `utilityUpdated` is the utility's own
+ * update time, which is not known and is never invented. `app` is the app's own estimate at the moment of entry, kept for later accuracy checks.
+ */
+export function cleanProjections(list) {
+  return (Array.isArray(list) ? list : []).filter((p) => p && isMoney(+p.amount) && +p.amount >= 0 && isIso(p.periodEnd)).slice(-60).map((p) => ({
+    id: String(p.id || `p|${p.periodEnd}|${+p.amount}|${isIso(p.shownOn) ? p.shownOn : isIso(p.enteredAt) ? p.enteredAt : ''}`).slice(0, 80),
+    amount: +p.amount, soFar: isMoney(+p.soFar) && +p.soFar >= 0 && p.soFar !== '' && p.soFar != null ? +p.soFar : null,
+    periodStart: isIso(p.periodStart) && p.periodStart <= p.periodEnd ? p.periodStart : '', periodEnd: p.periodEnd,
+    source: typeof p.source === 'string' && p.source ? p.source.slice(0, 60) : 'entered by you', enteredAt: isIso(p.enteredAt) ? p.enteredAt : '', shownOn: isIso(p.shownOn) ? p.shownOn : '', utilityUpdated: null,
+    status: 'projected', app: p.app && isMoney(+p.app.mid) ? { mid: +p.app.mid, low: +p.app.low, high: +p.app.high, method: String(p.app.method || '').slice(0, 20), through: isIso(p.app.through) ? p.app.through : '' } : null,
+  })).filter((p, i, all) => all.findIndex((q) => q.id === p.id) === i).sort((a, b) => (a.enteredAt + a.id < b.enteredAt + b.id ? -1 : 1));
+}
+/** The projection to show for the current period: the latest snapshot whose period no final bill has closed. */
+export function currentProjection(state) {
+  const bills = cleanBills(state.bills);
+  const open = cleanProjections(state.projections).filter((p) => !finalBillFor(p, bills));
+  return open.length ? open[open.length - 1] : null;
+}
+/** The actual billing record for a projection's period (same end date within a day, and a compatible start). */
+export function finalBillFor(p, bills) {
+  return bills.find((b) => b.amount != null && Math.abs(isoGap(b.end, p.periodEnd)) <= 1 && (!p.periodStart || !b.start || Math.abs(isoGap(b.start, p.periodStart)) <= 1)) || null;
+}
+/** Does this amount fall in the household's ordinary range? Bills within 12% of the median define "ordinary"; the rest are named exceptions. */
+export function billNormal(bills, amount, usual = null) {
+  const list = bills.filter((b) => b.amount != null);
+  if (list.length < 3) return { known: false };
+  const med = median(list.map((b) => b.amount)), ord = list.filter((b) => Math.abs(b.amount / med - 1) <= 0.12), out = list.filter((b) => !ord.includes(b));
+  const lo = Math.min(...ord.map((b) => b.amount)), hi = Math.max(...ord.map((b) => b.amount));
+  // "Ordinary" is the range of those bills widened by 3% on each side: a projection a hair below the lowest ordinary bill isn't unusual.
+  return { known: true, within: amount >= lo * 0.97 && amount <= hi * 1.03, range: [lo, hi], n: ord.length, of: list.length, exceptions: out.map((b) => ({ end: b.end, amount: b.amount })), usual };
+}
+
+// ---- the forecast: pure, so a backtest can run it with only what was known at the time ----
+const FORECAST_ORDER = ['recent7', 'history', 'blend', 'weather'];
+const FORECAST_NAME = { recent7: 'Recent days', history: 'Your past bills', blend: 'Recent days + past bills', weather: 'Weather-adjusted' };
+export const FORECAST_METHODS = FORECAST_NAME;
+/** Price per kWh including everything on the bill (fixed charges, taxes), from the most recent bills' own totals — never from the hourly costs. */
+function effectiveCents(prior) {
+  const c = prior.filter((b) => b.kwh && b.amount != null).slice(-3).map((b) => b.amount / b.kwh);
+  return c.length ? { price: median(c), n: c.length, lo: Math.min(...c), hi: Math.max(...c) } : null;
+}
+function forecastCore({ days, bills, temps = {}, start, end, upto }) {
+  const L = isoGap(start, end) + 1, ok = days.filter((d) => d.date <= upto);
+  const meas = ok.filter((d) => d.date >= start && d.date <= end), measKwh = sum(meas.map((d) => d.kwh)), rem = L - meas.length;
+  const prior = bills.filter((b) => b.end < start && b.days && b.kwh), pr = effectiveCents(prior);
+  const rec7 = ok.length >= 7 ? avg(ok.slice(-7).map((d) => d.kwh)) : null;
+  const hist = prior.length ? avg(prior.map((b) => b.kwh / b.days)) : null;
+  // Weather: only with a clear temperature effect in the days before the period, and the last week's temperature assumed to continue.
+  let wx = null;
+  const fit = ok.filter((d) => d.date < start && Number.isFinite(temps[d.date])), cs = fit.length >= 30 ? coolingSlope(fit, temps) : null;
+  if (cs && cs.r2 >= 0.3 && cs.per_cdd > 2 * cs.se) { const t = avg(ok.slice(-7).map((d) => temps[d.date]).filter(Number.isFinite)); const my = avg(fit.map((d) => d.kwh)), mx = avg(fit.map((d) => Math.max(0, temps[d.date] - 65))); if (Number.isFinite(t)) wx = my + cs.per_cdd * (Math.max(0, t - 65) - mx); }
+  const rate = { recent7: rec7, history: hist, blend: rec7 != null && hist != null ? 0.5 * rec7 + 0.5 * hist : null, weather: wx };
+  const out = {};
+  for (const m of FORECAST_ORDER) if (rate[m] != null && pr) out[m] = { kwhDay: rate[m], kwh: measKwh + rem * rate[m], dollars: (measKwh + rem * rate[m]) * pr.price };
+  return { L, measured: meas.length, measKwh, remaining: rem, lastMeasured: meas.length ? meas[meas.length - 1].date : null, price: pr, methods: out, rate };
+}
+
+/**
+ * Backtest: forecast each saved bill using only readings up to `k` days into its period and only the bills that ended before it began.
+ * Returns the per-bill errors, a summary per method, and which method the current stage selects (lowest mean error; a simpler method wins
+ * when within $1.50). With only a handful of bills this is a sanity check, not proof — and it says so.
+ */
+export function backtestForecast({ state, temps = {}, k = 12 }) {
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete), bills = cleanBills(state.bills).map((b) => ({ ...b, days: billedDays(b) })).filter((b) => b.start && b.days && b.kwh && b.amount != null);
+  const rows = [];
+  bills.forEach((b, i) => {
+    const upto = isoAdd(b.start, k - 1), fc = forecastCore({ days, bills: bills.slice(0, i), temps, start: b.start, end: b.end, upto });
+    if (fc.measured < Math.min(k, 3)) return rows.push({ end: b.end, start: b.start, days: b.days, actual: b.amount, skipped: 'Not enough readings in the first days of that period.' });
+    if (!fc.price) return rows.push({ end: b.end, start: b.start, days: b.days, actual: b.amount, skipped: 'No earlier bill to learn the price from.' });
+    rows.push({ end: b.end, start: b.start, days: b.days, actual: b.amount, measured: fc.measured, errors: Object.fromEntries(Object.entries(fc.methods).map(([m, v]) => [m, r2(v.dollars - b.amount)])), forecasts: Object.fromEntries(Object.entries(fc.methods).map(([m, v]) => [m, r2(v.dollars)])) });
+  });
+  const used = rows.filter((r) => r.errors);
+  const summary = {};
+  for (const m of FORECAST_ORDER) {
+    const e = used.filter((r) => r.errors[m] != null);
+    if (e.length) summary[m] = { n: e.length, mae: r2(avg(e.map((r) => Math.abs(r.errors[m])))), bias: r2(avg(e.map((r) => r.errors[m]))), mape: r1(avg(e.map((r) => Math.abs(r.errors[m]) / r.actual)) * 100), worst: r2(Math.max(...e.map((r) => Math.abs(r.errors[m])))) };
+  }
+  let selected = null;
+  for (const m of FORECAST_ORDER) if (summary[m] && summary[m].n >= 3) { const best = Math.min(...Object.values(summary).filter((x) => x.n >= 3).map((x) => x.mae)); if (summary[m].mae <= best + 1.5) { selected = m; break; } }
+  return { k, rows, summary, selected, n: used.length, caution: `Based on ${used.length} past bill${used.length === 1 ? '' : 's'} — enough for a sanity check, not for a precise accuracy claim.` };
+}
+
+/**
+ * The independent forecast for one billing period, from readings the app actually has. Days without a reading are forecast, never counted as zero.
+ * The point estimate is shown only when the backtested error is small enough to be useful; otherwise only a range.
+ */
+export function forecastBill({ state, temps = {}, now = Date.now(), period = null }) {
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete), bills = cleanBills(state.bills).map((b) => ({ ...b, days: billedDays(b) })).filter((b) => b.start && b.days && b.kwh && b.amount != null);
+  const proj = currentProjection(state);
+  const per = period || (proj && proj.periodStart ? { start: proj.periodStart, end: proj.periodEnd } : null) || (bills.length ? (() => { const L = Math.round(median(bills.map((b) => b.days))); const s0 = isoAdd(bills[bills.length - 1].end, 1); return { start: s0, end: isoAdd(s0, L - 1), assumed: true }; })() : null);
+  if (!per || !days.length) return { available: false, reason: !bills.length ? 'Needs at least one billing period to learn your price.' : 'Needs readings.' };
+  const lastDay = days[days.length - 1].date, upto = lastDay < per.end ? lastDay : per.end;
+  const fc = forecastCore({ days, bills, temps, start: per.start, end: per.end, upto });
+  const today = C.localParts(now).date, age = Math.max(0, isoGap(lastDay, today));
+  const base = { available: true, period: per, days: fc.L, measured: fc.measured, remaining: fc.remaining, lastMeasured: fc.lastMeasured, readingsEnd: lastDay, readingsAgeDays: age, measuredKwh: r1(fc.measKwh), periodAssumed: !!per.assumed };
+  if (!fc.price) return { ...base, available: false, reason: 'Needs a past bill with kWh to learn your all-in price per kWh.' };
+  const bt = backtestForecast({ state, temps, k: Math.min(Math.max(fc.measured, 3), fc.L - 1) });
+  const method = fc.measured < 3 ? 'history' : bt.selected && fc.methods[bt.selected] ? bt.selected : (fc.methods.blend ? 'blend' : fc.methods.recent7 ? 'recent7' : 'history');
+  const m = fc.methods[method];
+  if (!m) return { ...base, available: false, reason: 'Not enough readings or past bills for any method.' };
+  const mae = bt.summary[method]?.mae, half = mae != null && bt.n >= 3 ? 1.5 * mae : 0.12 * m.dollars, mid = m.dollars;
+  const tooWide = half > 0.2 * mid;
+  const all = Object.fromEntries(Object.entries(fc.methods).map(([k2, v]) => [k2, r2(v.dollars)]));
+  return { ...base, method, methodName: FORECAST_NAME[method], mid: r2(mid), low: r2(mid - half), high: r2(mid + half), halfWidth: r2(half), pointOk: !tooWide, kwhDay: r1(m.kwhDay), kwh: r0(m.kwh), cents: r2(fc.price.price * 100), centsRange: [r2(fc.price.lo * 100), r2(fc.price.hi * 100)], priceFrom: fc.price.n,
+    recent7: fc.rate.recent7 != null ? r1(fc.rate.recent7) : null, history: fc.rate.history != null ? r1(fc.rate.history) : null, otherMethods: all, backtest: bt,
+    uncertainty: bt.n >= 3 ? `typical error in past bills about $${fmt(mae)} (${fmt(bt.summary[method].mape, 1)}%), so the range allows about $${fmt(half)} either way` : 'no past bills to check this against, so a ±12% range is assumed', unmeasured: fc.remaining,
+    method_text: `${fmt(fc.measKwh)} kWh measured in the ${fc.measured} days with readings (${md(per.start)}–${md(fc.lastMeasured)}) + ${fc.remaining} days forecast at ${fmt(m.kwhDay, 1)} kWh a day (${method === 'blend' ? `half your last 7 days, ${fmt(fc.rate.recent7, 1)}, half your past bills’ average, ${fmt(fc.rate.history, 1)}` : method === 'recent7' ? 'your last 7 days' : method === 'history' ? 'your past bills’ average' : 'your temperature pattern'}), × ${fmt(fc.price.price * 100, 2)}¢ per kWh (the all-in average of your last ${fc.price.n} bills, which includes fixed charges and taxes) = ${money(mid)}.` };
+}
+
+/** Why the app's estimate and Delmarva's projection may differ — computed differences first, then possibilities that are labelled as such. */
+export function explainForecastGap(fc, proj) {
+  if (!fc?.available || !proj) return null;
+  const diff = fc.mid - proj.amount, lines = [], L = fc.days;
+  lines.push({ kind: 'size', text: `${money(Math.abs(diff))} ${diff >= 0 ? 'above' : 'below'} Delmarva’s projection. In past bills the app’s forecast was typically about $${fmt(fc.backtest.summary[fc.method]?.mae ?? 0)} off, so ${Math.abs(diff) <= (fc.backtest.summary[fc.method]?.mae ?? Infinity) ? 'this gap is within the app’s normal error: the two forecasts agree.' : 'this gap is larger than the app’s normal error.'}` });
+  lines.push({ kind: 'computed', text: `The period is ${L} days (${md(fc.period.start)}–${md(fc.period.end)}). Delmarva’s ${money(proj.amount)} is ${money(proj.amount / L)} a day; the app’s estimate is ${money(fc.mid / L)} a day (${fmt(fc.kwhDay, 1)} kWh × ${fmt(fc.cents, 2)}¢).` });
+  if (proj.soFar != null) {
+    const days = (proj.soFar * L) / proj.amount;
+    lines.push({ kind: 'possible', text: `Possible: Delmarva’s figure equals its ${money(proj.soFar)} so far spread over the whole period if that spending covers ${fmt(days, 1)} days (${money(proj.soFar)} ÷ ${fmt(days, 1)} × ${L}). The screenshot doesn’t say how many days the ${money(proj.soFar)} covers, so this is a guess about Delmarva’s method, not a fact.` });
+  }
+  lines.push({ kind: 'computed', text: `The app’s readings end ${md(fc.readingsEnd)}: ${fc.measured} of ${L} days are measured, ${fc.remaining} are forecast.${fc.readingsAgeDays > 0 ? ` The newest reading is ${fc.readingsAgeDays} day${fc.readingsAgeDays === 1 ? '' : 's'} old.` : ''}` });
+  lines.push({ kind: 'unknown', text: 'Not known: Delmarva’s own method, its current prices, the weather it assumes, and any charges the hourly export leaves out. Neither number is a final bill.' });
+  return { diff: r2(diff), lines };
+}
+
+/** Utility projection and app estimate, each against the final bill — only once that bill exists. */
+export function forecastAccuracy(state) {
+  const bills = cleanBills(state.bills), rows = [];
+  for (const p of cleanProjections(state.projections)) {
+    const b = finalBillFor(p, bills);
+    if (b) rows.push({ end: b.end, bill: b.amount, utility: p.amount, utilityErr: r2(p.amount - b.amount), app: p.app?.mid ?? null, appErr: p.app ? r2(p.app.mid - b.amount) : null, shownOn: p.shownOn || p.enteredAt });
+  }
+  return { rows, pending: cleanProjections(state.projections).filter((p) => !finalBillFor(p, bills)).length, text: rows.length ? '' : 'No projection has been compared with a final bill yet. The first check happens when the bill for the current period arrives.' };
 }

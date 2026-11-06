@@ -610,6 +610,36 @@ function awayCards(all = false) {
 }
 
 const KIND_TAG = { measured: 'Measured', estimate: 'Estimate', statement: 'Statement', reconciled: 'Matched to readings', projection: 'Utility projection' };
+
+// ---------- v20: this billing period — Delmarva's projection and our own forecast, kept apart ----------
+const fresh = (fc) => (fc.readingsAgeDays <= 0 ? 'today' : `${fc.readingsAgeDays} day${fc.readingsAgeDays === 1 ? '' : 's'} before today`);
+function periodCard(bv) {
+  const proj = bv.projection, fc = bv.forecast, gap = bv.gap;
+  if (!proj && !(fc?.available)) return `<section class="card"><p class="card-label">This billing period</p><p>No projection or forecast yet. Enter what your Delmarva account shows below${bv.statements.length ? '' : ', or add a statement'}; the app never presents its own estimate as Delmarva’s.</p>${bv.usual ? `<p class="fine">You told us your bill is usually ${money(bv.usual.low)}–${money(bv.usual.high)}.</p>` : ''}</section>`;
+  const period = proj ? `${esc(shortDate(proj.periodStart || fc?.period?.start || ''))}${proj.periodStart || fc?.period ? '–' : 'ending '}${esc(shortDate(proj.periodEnd))}` : fc ? `${esc(shortDate(fc.period.start))}–${esc(shortDate(fc.period.end))}${fc.periodAssumed ? ' (assumed from your usual bill length)' : ''}` : '';
+  const left = proj && proj.soFar != null ? proj.amount - proj.soFar : null;
+  const projHtml = proj ? `<div class="q"><p class="card-label">Delmarva’s projection <span class="kind-chip">Projected · not a final bill</span></p>
+      <h2>${money(proj.amount)}</h2><p class="fine">For ${period}${fc?.available ? ` (${fc.days} days)` : ''}. Entered by you from your Delmarva account${proj.shownOn ? `, as seen ${esc(shortDate(proj.shownOn))}` : proj.enteredAt ? ` on ${esc(shortDate(proj.enteredAt))}` : ''}. Delmarva’s own update time isn’t known, and nothing syncs automatically.</p>
+      ${proj.soFar != null ? `<p><b>${money(proj.soFar)}</b> estimated charges so far <small>(Delmarva’s estimate of what has built up — not a posted charge or a payment)</small></p><p class="fine">Projected remaining: about ${money(left)} (${money(proj.amount)} − ${money(proj.soFar)}). That is part of this projection, not a separate bill and not money owed now.</p>` : ''}
+      ${bv.normal?.known ? `<p>${bv.normal.within ? `<b>Normal for you:</b> within the ${money(bv.normal.range[0])}–${money(bv.normal.range[1])} range of ${bv.normal.n} of your ${bv.normal.of} bills.` : `<b>Outside your usual range</b> of ${money(bv.normal.range[0])}–${money(bv.normal.range[1])}.`}${bv.normal.exceptions.length ? ` The exception${bv.normal.exceptions.length > 1 ? 's' : ''}: ${bv.normal.exceptions.map((e) => `${money(e.amount)} (bill ending ${esc(shortDate(e.end))})`).join(', ')}.` : ''}</p>` : ''}</div>` : '';
+  const fcHtml = fc?.available ? `<div class="q"><p class="card-label">Our independent estimate <span class="kind-chip">Estimate · ${esc(fc.methodName)}</span></p>
+      <h2>${fc.pointOk ? `about ${money(fc.mid)}` : `${money(fc.low)}–${money(fc.high)}`}</h2>
+      <p class="fine">${fc.pointOk ? `Range ${money(fc.low)}–${money(fc.high)}. ` : 'Too uncertain for a single number. '}Readings run to ${esc(shortDate(fc.readingsEnd))} (${fresh(fc)}): ${fc.measured} of ${fc.days} days are measured, the other ${fc.remaining} are forecast — not observed.</p>
+      <details class="inline"><summary>How this was worked out</summary><p class="fine">${esc(fc.method_text)} Uncertainty: ${esc(fc.uncertainty)}. Other methods: ${Object.entries(fc.otherMethods).map(([m, v]) => `${esc(A.FORECAST_METHODS[m])} ${money(v)}`).join(', ')}.</p></details></div>` : '';
+  const gapHtml = gap ? `<div class="q"><p class="card-label">Difference: ${money(Math.abs(gap.diff))} ${gap.diff >= 0 ? 'above' : 'below'} Delmarva</p><ul class="bullets">${gap.lines.map((l) => `<li>${esc(l.text)} ${l.kind === 'possible' ? '<small>(possibility)</small>' : l.kind === 'unknown' ? '<small>(unknown)</small>' : ''}</li>`).join('')}</ul><p class="fine">The two are kept separate on purpose; the app doesn’t adjust its estimate to match Delmarva.</p></div>` : '';
+  return `<section class="card"><p class="card-label">This billing period</p>${projHtml}${fcHtml}${gapHtml}</section>`;
+}
+function accuracyCard(bv) {
+  const bt = bv.forecast?.backtest, acc = bv.accuracy;
+  if (!bt && !acc.rows.length) return '';
+  const names = A.FORECAST_METHODS;
+  const rows = bt ? Object.entries(bt.summary).map(([m, v]) => `<tr><td>${esc(names[m])}${bt.selected === m ? ' ✓' : ''}</td><td class="t">$${num(v.mae, 2)}</td><td class="t">${v.bias >= 0 ? '+' : '−'}$${num(Math.abs(v.bias), 2)}</td><td class="t">$${num(v.worst, 2)}</td></tr>`).join('') : '';
+  return `<h2 class="section-title">How accurate are the forecasts?</h2><section class="card">
+    ${acc.rows.length ? `<div class="table-wrap"><table><thead><tr><th>Bill ending</th><th class="t">Final</th><th class="t">Delmarva</th><th class="t">App</th></tr></thead><tbody>${acc.rows.map((r) => `<tr><td>${esc(shortDate(r.end))}</td><td class="t">${money(r.bill)}</td><td class="t">${money(r.utility)} (${r.utilityErr >= 0 ? '+' : '−'}${money(Math.abs(r.utilityErr))})</td><td class="t">${r.app != null ? `${money(r.app)} (${r.appErr >= 0 ? '+' : '−'}${money(Math.abs(r.appErr))})` : '—'}</td></tr>`).join('')}</tbody></table></div>` : `<p>${esc(acc.text)}</p>`}
+    ${bt ? `<p class="card-label">Practice runs on your ${bt.n} earlier bills (${bt.k} days of readings each, nothing from later)</p><div class="table-wrap"><table><thead><tr><th>Method</th><th class="t">Typical error</th><th class="t">Bias</th><th class="t">Worst</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="fine">✓ = the method the app uses now: lowest typical error at this stage, preferring the simpler method when within $1.50. A weather-adjusted method needs a clear weather effect in your use; yours is too weak, so it isn’t used. ${esc(bt.caution)} The worst misses were on the longest bill (34 days) — period length matters.</p>` : ''}</section>`;
+}
+
 let stmtDraft = null; // { fields, found, notFound, name, editingId? } from a PDF or an existing statement, shown for review before saving
 const STMT_FIELDS = [['supply', 'Supply charges ($)'], ['delivery', 'Delivery charges ($)'], ['fixed', 'Customer / fixed charge ($)'], ['taxes', 'Taxes and fees ($)'], ['credits', 'Credits ($, as a positive number)'], ['adjustments', 'Adjustments ($, minus for a reduction)'], ['priorBalance', 'Previous balance ($)'], ['payments', 'Payments ($)'], ['totalDue', 'Total amount due ($)']];
 function viewBills() {
@@ -621,15 +651,10 @@ function viewBills() {
   const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(statement PDF)</small>' : x.source === 'greenbutton' ? ' <small>(Delmarva billing data)</small>' : ' <small>(entered)</small>'}${x.statementDate ? ` <small>billed ${esc(shortDate(x.statementDate))}</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td></tr>
     <tr class="sub"><td colspan="5">${x.cost_per_day != null ? `<small>${money(x.cost_per_day)} a day${x.cents_per_kwh != null ? ` · ${num(x.cents_per_kwh, 1)}¢ per kWh on average` : ''}.</small> ` : ''}${x.readings_kwh != null ? `<small>Your readings for the same days: ${num(x.readings_kwh, 2)} kWh${x.kwh_within_rounding ? ' — matches (billed kWh are whole numbers)' : x.kwh_matches === false ? ' — more than rounding apart' : x.kwh_matches ? ' — matches' : ''}; the file’s hourly costs ${money(x.interval_cost)}, ${money(Math.abs(x.beyond_readings))} ${x.beyond_readings >= 0 ? 'less' : 'more'} than the billed amount — not itemised, so not explained.</small> ` : ''}${x.fixed != null ? `<small>Fixed ${money(x.fixed)}.</small> ` : ''}${x.credits ? `<small>Credits ${money(x.credits)}.</small> ` : ''}${x.priorBalance != null || x.payments != null ? `<small>Previous balance/payments are kept out of comparisons.</small> ` : ''}${x.notes.map((n) => `<small>${esc(n)}</small>`).join(' ')} <button class="link" data-act="bill-edit" data-id="${esc(x.id)}">Correct</button> · <button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove</button></td></tr>`).join('');
   const drivers = bv.compare ? `<section class="card"><p class="card-label">Why the last bill changed</p><p>${money(bv.compare.prev.amount)} → ${money(bv.compare.cur.amount)} (${bv.compare.total >= 0 ? '+' : '−'}${money(Math.abs(bv.compare.total))})</p><ul class="bullets">${bv.compare.drivers.map((x) => `<li>${esc(x.label)}${x.amount != null ? `: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}` : ''} <small>(${x.status === 'confirmed' ? 'from your statements' : x.status === 'possible' ? 'possible, not measured' : x.status === 'unknown' ? 'can’t compare' : 'not explained by the figures entered'})</small></li>`).join('')}</ul>${bv.compare.typical_cost_per_day != null ? `<p class="fine">Your earlier statements cost about ${money(bv.compare.typical_cost_per_day)} a day (median).</p>` : ''}</section>` : '';
-  const proj = bv.projection, est = bv.estimate;
+  const proj = bv.projection;
   const review = pendingBilling.length ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Needs your review</p>${pendingBilling.map((r, i) => `<p><b>${esc(shortDate(r.incoming.start))}–${esc(shortDate(r.incoming.end))}</b>: the new export says ${money(r.incoming.amount)}, ${num(r.incoming.kwh)} kWh; saved: ${esc(shortDate(r.existing.start || r.existing.end))}–${esc(shortDate(r.existing.end))} ${money(r.existing.amount)}${r.existing.kwh ? `, ${num(r.existing.kwh)} kWh` : ''} (${r.existing.source === 'greenbutton' ? 'earlier billing export' : r.existing.source === 'pdf' ? 'statement PDF' : 'entered by you'}). ${r.kind === 'changed' ? 'Possibly a corrected bill.' : 'The dates overlap.'}</p><div class="row2"><button class="btn primary" data-act="billing-take" data-i="${i}">Use the new figures</button><button class="btn secondary" data-act="billing-keep" data-i="${i}">Keep the saved one</button></div>`).join('')}</section>` : '';
   return `${head}${review}
-    <section class="card"><p class="card-label">What will the bill be?</p>
-      ${proj ? `<p><b>${money(proj.amount)}</b> <span class="kind-chip">Delmarva projection · entered by you</span>${proj.asOf ? ` <small>as of ${esc(shortDate(proj.asOf))}</small>` : ''} <button class="link" data-act="proj-clear">Remove</button></p>` : ''}
-      ${est ? `<p><b>${money(est.low)}–${money(est.high)}</b> <span class="kind-chip">App estimate</span></p><p class="fine">${esc(est.method)}</p>` : ''}
-      ${!proj && !est ? `<p>No estimate yet: the app needs at least one statement with dates, kWh and charges. It never presents the file’s per-hour costs as a bill.</p>` : ''}
-      ${bv.statements.some((x) => x.source === 'greenbutton') ? '<p class="fine">Billing periods marked “Delmarva billing data” come from your Green Button billing export: amounts as Delmarva reports them, not checked against a statement PDF.</p>' : ''}
-      ${bv.usual ? `<p class="fine">You told us your bill is usually ${money(bv.usual.low)}–${money(bv.usual.high)}.</p>` : ''}</section>
+    ${periodCard(bv)}
     ${drivers}
     <h2 class="section-title">Your statements</h2><section class="card">
       ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Service period</th><th class="t">Charges</th><th class="t">Days</th><th class="t">kWh</th><th class="t">kWh/day</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements yet. Add one below — from the PDF on your Mac, or by typing a few numbers.</p>'}
@@ -644,10 +669,13 @@ function viewBills() {
         <label class="item"><span>Estimated meter reading${flag('estimatedRead')}</span><input type="checkbox" id="bill-estimated" ${d.estimatedRead ? 'checked' : ''}></label></details>
       <div class="row2"><button class="btn primary" data-act="bill-add">Save statement</button>${stmtDraft ? '<button class="btn secondary" data-act="bill-draft-clear">Discard</button>' : ''}</div></div>
       <p class="fine">Stored on this device only, included in your backups. Previous balance and payments are kept separate from this period’s charges.</p></section>
+    ${accuracyCard(bv)}
     <h2 class="section-title">Delmarva projection and your usual bill</h2><section class="card">
-      <div class="bill-form"><label class="item"><span>Delmarva’s projected bill ($)</span><input type="number" inputmode="decimal" id="proj-amount" min="0" step="0.01"></label><label class="item"><span>As of</span><input type="date" id="proj-asof"></label><button class="btn secondary" data-act="proj-save">${proj ? 'Replace' : 'Save'} projection</button></div>
-      <div class="bill-form"><label class="item"><span>Usual bill, low ($)</span><input type="number" inputmode="decimal" id="usual-low" value="${bv.usual ? bv.usual.low : ''}"></label><label class="item"><span>Usual bill, high ($)</span><input type="number" inputmode="decimal" id="usual-high" value="${bv.usual ? bv.usual.high : ''}"></label><button class="btn secondary" data-act="usual-save">Save</button></div>
-      <p class="fine">Both are your numbers, shown as yours. The app’s own estimate only appears once a statement gives it prices.</p></section>
+      <p class="fine">Type what your Delmarva account shows. Each entry is kept as a snapshot, so projections can be compared with the final bill later. Nothing here is a statement.</p>
+      <div class="bill-form"><label class="item"><span>Projected total ($)</span><input type="number" inputmode="decimal" id="proj-amount" min="0" step="0.01"></label><label class="item"><span>Estimated charges so far ($) <small>(optional)</small></span><input type="number" inputmode="decimal" id="proj-sofar" min="0" step="0.01"></label>
+      <label class="item"><span>Period starts</span><input type="date" id="proj-start"></label><label class="item"><span>Period ends</span><input type="date" id="proj-end"></label><label class="item"><span>Date you saw it <small>(optional)</small></span><input type="date" id="proj-asof"></label><button class="btn secondary" data-act="proj-save">Save projection</button></div>
+      ${bv.projections.length ? `<p class="card-label">Saved projections</p><ul class="bullets">${bv.projections.slice().reverse().map((p) => `<li>${money(p.amount)} for ${esc(shortDate(p.periodStart || p.periodEnd))}–${esc(shortDate(p.periodEnd))}${p.soFar != null ? `, ${money(p.soFar)} so far` : ''} <small>(${p.shownOn ? `seen ${esc(shortDate(p.shownOn))}` : `entered ${esc(shortDate(p.enteredAt))}`}${A.finalBillFor(p, bv.statements) ? ' — final bill is in' : ''})</small> <button class="link" data-act="proj-remove" data-id="${esc(p.id)}">Remove</button></li>`).join('')}</ul>` : ''}
+      <div class="bill-form"><label class="item"><span>Usual bill, low ($)</span><input type="number" inputmode="decimal" id="usual-low" value="${bv.usual ? bv.usual.low : ''}"></label><label class="item"><span>Usual bill, high ($)</span><input type="number" inputmode="decimal" id="usual-high" value="${bv.usual ? bv.usual.high : ''}"></label><button class="btn secondary" data-act="usual-save">Save</button></div></section>
     ${bv.lines.length ? `<h2 class="section-title">What the numbers say</h2><section class="card"><ul class="findings">${bv.lines.map((l) => `<li><span class="kind-tag">${esc(KIND_TAG[l.kind])}</span> ${esc(l.text)}</li>`).join('')}</ul></section>` : ''}
     <h2 class="section-title">Month by month (calendar months)</h2><section class="card"><div class="table-wrap"><table><thead><tr><th>Month</th><th class="t">kWh</th><th class="t">Per day</th><th class="t">File’s per-hour costs</th></tr></thead><tbody>${monthRows}</tbody></table></div>
       <p class="fine">Only months with readings are listed; days without readings are left out, not counted as zero. Calendar months aren’t billing periods, and the per-hour costs are not a bill.</p></section>
@@ -682,9 +710,20 @@ function billFirstCard() {
     ? `<h2>${num(b.recent.kwh, 1)} kWh a day <span class="kind-chip">${esc(b.label)}</span></h2><p class="fine">Last 14 days to ${esc(shortDate(last))}. Your usual: ${num(b.range.low, 1)}–${num(b.range.high, 1)} kWh a day.${bv.thirty ? ` Latest 30 days: ${num(bv.thirty.latest.kwh)} kWh.` : ''} Measured.</p>`
     : `<h2>${num(r.perDay, 1)} kWh a day</h2><p class="fine">${r.n} day${r.n === 1 ? '' : 's'} of readings — about 10 weeks are needed to know what’s normal for you.</p>`;
   const lines = [];
+  const fc = bv.forecast, proj = bv.projection, last1 = bv.statements[bv.statements.length - 1];
+  if (proj) {
+    lines.push(`<h2>${usd(proj.amount)} <span class="kind-chip">Delmarva projection</span></h2><p class="fine">For ${esc(shortDate(proj.periodStart || fc?.period?.start || proj.periodEnd))}–${esc(shortDate(proj.periodEnd))}. Projected, not final; entered by you from your Delmarva account${proj.shownOn ? ` (seen ${esc(shortDate(proj.shownOn))})` : ''}.${proj.soFar != null ? ` Estimated charges so far: ${usd(proj.soFar)}.` : ''}</p>`);
+    if (fc?.available) lines.push(`<p>Our own estimate: <b>${fc.pointOk ? `about ${usd(fc.mid)}` : `${usd(fc.low)}–${usd(fc.high)}`}</b> <span class="kind-chip">Estimate</span> <small>${fc.measured} of ${fc.days} days measured, to ${esc(shortDate(fc.readingsEnd))}; ${usd(Math.abs(bv.gap?.diff ?? fc.mid - proj.amount))} ${fc.mid >= proj.amount ? 'above' : 'below'} Delmarva — ${bv.gap && Math.abs(bv.gap.diff) <= (fc.backtest.summary[fc.method]?.mae ?? 0) ? 'within our usual error' : 'see Bills'}.</small></p>`);
+    if (bv.normal?.known) lines.push(`<p><b>${bv.normal.within ? 'Normal for you.' : 'Outside your usual range.'}</b> ${bv.normal.within ? `Within ${usd(bv.normal.range[0])}–${usd(bv.normal.range[1])}, where ${bv.normal.n} of your ${bv.normal.of} bills fell.` : ''}${bv.normal.exceptions.length ? ` Only ${bv.normal.exceptions.map((e) => `the ${usd(e.amount)} bill ending ${esc(shortDate(e.end))}`).join(' and ')} ${bv.normal.exceptions.length > 1 ? 'were' : 'was'} unusual.` : ''}</p>`);
+    if (fc?.available && last1?.kwh_per_day != null && fc.measured >= 3) {
+      const measKd = fc.measuredKwh / fc.measured, du = (measKd / last1.kwh_per_day - 1) * 100, dd = proj.amount - last1.amount;
+      lines.push(`<p class="fine"><b>Use:</b> ${num(measKd, 1)} kWh a day so far this period vs ${num(last1.kwh_per_day, 1)} in the last bill (${du >= 0 ? '+' : '−'}${num(Math.abs(du))}%, measured).<br><b>Dollars:</b> ${usd(proj.amount)} projected vs ${usd(last1.amount)} billed (${dd >= 0 ? '+' : '−'}${usd(Math.abs(dd))}, ${dd >= 0 ? '+' : '−'}${num(Math.abs(dd / last1.amount) * 100)}%). Billed days: ${fc.days} vs ${last1.billed_days ?? '?'}.</p>`);
+    }
+  } else {
   if (bv.projection) lines.push(`<p><b>${usd(bv.projection.amount)}</b> <span class="kind-chip">Delmarva projection · entered by you</span></p>`);
   if (bv.estimate) lines.push(`<p><b>${usd(bv.estimate.low)}–${usd(bv.estimate.high)}</b> <span class="kind-chip">App estimate</span></p><p class="fine">${esc(bv.estimate.method)}</p>`);
   if (!bv.projection && !bv.estimate) lines.push(`<p>${bv.usual ? `You told us it’s usually <b>${usd(bv.usual.low)}–${usd(bv.usual.high)}</b>. ` : ''}The app can’t estimate this bill yet: it needs one Delmarva statement (dates, kWh and charges).</p>${bv.thirty?.latest.cost != null ? `<p class="fine">The file’s per-hour costs for the latest 30 days add up to ${usd(bv.thirty.latest.cost)} — not a bill: no fixed charges, taxes or credits.</p>` : ''}`);
+  }
   let why;
   if (bv.compare) {
     const conf = bv.compare.drivers.filter((x) => x.status === 'confirmed' && x.amount != null).sort((x, y) => Math.abs(y.amount) - Math.abs(x.amount)).slice(0, 2);
@@ -700,8 +739,9 @@ function billFirstCard() {
   const th = S.profile.thermostat, sp0 = sp.items.find((o) => o.id === 'setpoint');
   const thermoLine = th ? q('Thermostat', `<p><b>Actual: ${th.setpoint}°F HOLD, programming ${th.programming === 'off' ? 'OFF' : 'ON'}</b> <small>(confirmed by you)</small></p>${sp0 && !running.some((e) => /°F instead of/.test(e.title)) ? `<p class="fine">Optional test: try ${th.setpoint + 1}°F for two warm weeks — only if you want to; the app won’t change it. <a href="#savings">Details</a></p>` : ''}`) : '';
   const testing = running.length ? q('Your test', running.map((e) => { const r = expEval(e); return `<p><b>${esc(e.title)}</b> — ${esc(r.label)}. <small>${esc(r.detail || '')}</small></p>`; }).join('') + '<a class="btn plain" href="#savings">See the test ›</a>') : '';
-  return `<section class="card billfirst">${q('How much are you using?', use)}${q('What will the bill be?', lines.join(''))}<a class="btn plain" href="#bills">Bills and statements ›</a>
-    ${q('Why higher or lower?', why)}${q('What could you save?', save)}${testing}${thermoLine}</section>`;
+  const hasProj = !!bv.projection;
+  return `<section class="card billfirst">${hasProj ? `${q('What’s my projected bill?', lines.join(''))}<a class="btn plain" href="#bills">Bills, estimate and how accurate it is ›</a>${q('How much am I using?', use)}` : `${q('How much are you using?', use)}${q('What will the bill be?', lines.join(''))}<a class="btn plain" href="#bills">Bills and statements ›</a>`}
+    ${q(hasProj ? 'Why was the last bill cheaper?' : 'Why higher or lower?', why)}${q(hasProj ? 'What could I do next?' : 'What could you save?', save)}${testing}${thermoLine}</section>`;
 }
 
 // ---------- Savings tab ----------
@@ -1323,11 +1363,19 @@ const ACTIONS = {
   },
   'bill-remove'(el) { S.bills = (S.bills || []).filter((b) => b.id !== el.dataset.id); save(); render(); },
   'proj-save'() {
-    const amount = +document.getElementById('proj-amount')?.value, asOf = document.getElementById('proj-asof')?.value || todayIso();
-    if (!document.getElementById('proj-amount')?.value || !(amount >= 0)) return toast('Enter the projected amount.', true);
-    S.projection = A.cleanProjection({ amount, asOf }); save(); render(); toast('Projection saved. It’s shown as Delmarva’s number, not the app’s.');
+    const v = (id) => document.getElementById(id)?.value || '', amount = v('proj-amount') === '' ? null : +v('proj-amount'), soFar = v('proj-sofar') === '' ? null : +v('proj-sofar');
+    const start = v('proj-start'), end = v('proj-end');
+    if (amount == null || !(amount >= 0)) return toast('Enter the projected total.', true);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(end)) return toast('Enter the date the period ends.', true);
+    if (start && start > end) return toast('The period must start before it ends.', true);
+    if (soFar != null && soFar > amount) return toast('“So far” can’t be more than the projected total.', true);
+    const f = A.forecastBill({ state: { ...S, projections: [] }, temps: allTemps(), period: start ? { start, end } : null });
+    const snap = A.cleanProjections([{ amount, soFar, periodStart: start, periodEnd: end, shownOn: v('proj-asof'), enteredAt: todayIso(), source: 'entered by you', app: f.available ? { mid: f.mid, low: f.low, high: f.high, method: f.method, through: f.readingsEnd } : null }])[0];
+    if ((S.projections || []).some((p) => p.id === snap.id)) return toast('That projection is already saved.', true);
+    try { commitAndReload({ ...S, projections: A.cleanProjections([...(S.projections || []), snap]) }, 'projection'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    render(); toast('Projection saved as Delmarva’s number. The app’s own estimate is unchanged.');
   },
-  'proj-clear'() { S.projection = null; save(); render(); },
+  'proj-remove'(el) { S.projections = (S.projections || []).filter((p) => p.id !== el.dataset.id); save(); render(); },
   'ai-cancel'() { fetch('/api/analyze/cancel', { method: 'POST' }).catch(() => {}); aiCtl?.abort(); },
   'restore-choice'(el) { if (pendingRestore) { pendingRestore.choices[el.dataset.id] = el.dataset.v; render(); } },
   'restore-cancel'() { pendingRestore = null; if (householdUpdate && route() === 'today') householdUpdate = { ...householdUpdate, dismissed: true }; location.hash = route() === 'restore' ? 'settings' : route(); render(); },
