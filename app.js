@@ -297,7 +297,7 @@ const actionItem = (o) => `<li><b>${esc(o.what)}</b><span>${esc(o.why)}</span><s
 function actionsCard(r = null) {
   const items = actionsFor(r), nc = A.noChangeSummary(r, items);
   if (!items.length && !nc) return '';
-  return `<h2 class="section-title">Recommended actions</h2><section class="card">${nc ? `<p class="nochange">${esc(nc)}</p>` : ''}${items.length ? `<ul class="findings actions">${items.slice(0, 5).map(actionItem).join('')}</ul>` : ''}</section>`;
+  return `<h2 class="section-title">Recommended actions <span class="kind-chip">Recommended</span></h2><section class="card">${nc ? `<p class="nochange">${esc(nc)}</p>` : ''}${items.length ? `<ul class="findings actions">${items.slice(0, 5).map(actionItem).join('')}</ul>` : ''}</section>`;
 }
 const LEVEL = {
   day: (r) => `Based on ${r.n} full day${r.n === 1 ? '' : 's'} — enough for the daily pattern, not yet for trends.`,
@@ -312,7 +312,7 @@ function learnedSection(r) {
   const top = list.slice(0, 4), more = list.slice(4);
   const pk = r.peak, nt = r.night;
   const day = r.prof ? disclosure('typical-day', 'Your typical day, hour by hour', `<p class="fine">${esc(`Average use for each hour across ${r.hd.length} day${r.hd.length === 1 ? '' : 's'}.${pk ? ` The tallest bars, ${hourLabel(pk.start)}–${hourLabel(pk.end % 24)}, are your busiest hours.` : ''}${nt ? ` The lowest, around ${num(nt.base)} W, is what never switches off.` : ''}`)}</p>${barChart(r.prof, { label: 'Average electricity use by hour of day', ticks: r.prof.map((_, h) => hourLabel(h)), tips: r.prof.map((v, h) => `${hourLabel(h)}: ${num(v * 1000)} W average`) })}`) : '';
-  return `<h2 class="section-title">What we learned</h2><section class="card learned"><p class="fine">${esc(LEVEL[r.level](r))} Calculated on this device.</p><div class="stats">${r.facts.map((f) => `<div class="stat"><b>${esc(f.v)}</b><span>${esc(f.l)}</span></div>`).join('')}</div>${findingUl(top)}${more.length ? disclosure('more-findings', `${more.length} more finding${more.length === 1 ? '' : 's'}`, findingUl(more)) : ''}${day}</section>`;
+  return `<h2 class="section-title">What we learned <span class="kind-chip">Measured · Calculated</span></h2><section class="card learned"><p class="fine">${esc(LEVEL[r.level](r))} Calculated on this device.</p><div class="stats">${r.facts.map((f) => `<div class="stat"><b>${esc(f.v)}</b><span>${esc(f.l)}</span></div>`).join('')}</div>${findingUl(top)}${more.length ? disclosure('more-findings', `${more.length} more finding${more.length === 1 ? '' : 's'}`, findingUl(more)) : ''}${day}</section>`;
 }
 function cantTell(r) {
   const item = (c) => `<li class="${c.ok ? 'done' : ''}"><span class="mark">${c.ok ? '✓' : '·'}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`;
@@ -326,6 +326,62 @@ function learnedToday() {
   const next = best ? `<div class="next"><p class="card-label">Best next step · ${esc(CONF[best.confidence])}</p><b>${esc(best.what)}</b><p class="fine">${esc(best.impact || best.why)}</p>${best.apply ? applyBtn(best) : ''}</div>` : nc ? `<p class="fine">${esc(nc)}</p>` : '';
   return `<section class="card learned"><p class="card-label">What we learned from your electricity data</p>${top ? `<h2>${esc(top.title)}</h2><p>${esc(top.detail)}</p>` : `<h2>${esc(r.facts.map((f) => `${f.v} ${f.l}`).slice(0, 2).join(' · '))}</h2>`}${next}<a class="btn plain" href="#insights">See your full report ›</a></section>`;
 }
+// ---------- AI analysis (runs only in the Mac companion; reports can be moved to the phone as a file) ----------
+
+const AI_KEY = 'aeo.ai.v1';
+const LOCAL = ['127.0.0.1', 'localhost'].includes(location.hostname) && !!document.querySelector('meta[name="aeo-companion"]'); // served by the Mac companion
+let companion = null; // {model, ollama, installed, busy} when served by the Mac companion
+const loadAI = () => { try { const v = JSON.parse(localStorage.getItem(AI_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
+const saveAI = (list) => { try { localStorage.setItem(AI_KEY, JSON.stringify(list.slice(-10))); } catch { toast('Couldn’t save the analysis on this device (storage full?).', true); } };
+const validReport = (r) => r && r.kind === 'aeo-ai-analysis' && r.version === 1 && r.analysis && Array.isArray(r.analysis.discoveries) && Array.isArray(r.analysis.recommendations) && Array.isArray(r.evidence);
+const evIds = (ids) => `<span class="src">Evidence ${ids.map(esc).join(', ')}</span>`;
+function aiReportHtml(rp) {
+  const a = rp.analysis, s = rp.stats || {};
+  const disc = a.discoveries.map((d) => `<li class="${d.type === 'hypothesis' ? 'hyp' : ''}"><b>${esc(d.title)}</b><span class="kind-tag">${d.type === 'hypothesis' ? 'Hypothesis — not confirmed' : 'Observation'}</span><span>${esc(d.detail)}</span>${evIds(d.evidence)}</li>`).join('');
+  const recs = a.recommendations.map((r, i) => `<li><b>${i === 0 ? 'Most likely to matter: ' : ''}${esc(r.action)}</b><span>${esc(r.why)}</span>${r.verify ? `<span><i>How to confirm:</i> ${esc(r.verify)}</span>` : ''}<span><i>${CONF[r.confidence] || 'Confidence not stated'}.</i> ${r.thermostat ? 'Involves your thermostat settings.' : 'No thermostat change needed.'}</span>${evIds(r.evidence)}</li>`).join('');
+  const ev = rp.evidence.map((e) => `<li><b>${esc(e.id)} · ${esc(e.tool.replace(/_/g, ' '))}${e.args && Object.keys(e.args).length ? ` (${esc(Object.values(e.args).join(', '))})` : ''}</b><code>${esc(JSON.stringify(e.result).slice(0, 600))}</code></li>`).join('');
+  const rej = (rp.rejected || []).map((x) => `<li>${esc(x.title || x.kind)} — ${esc(x.why.join('; '))}</li>`).join('');
+  return `${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
+    ${disc ? `<p class="card-label">Discoveries</p><ul class="findings">${disc}</ul>` : '<p class="fine">No discoveries passed the evidence check.</p>'}
+    ${recs ? `<p class="card-label">Recommended</p><ul class="findings actions">${recs}</ul>` : '<p class="fine">No recommendation passed the evidence check — nothing clearly worth changing.</p>'}
+    ${a.next_checks.length ? `<p class="card-label">What to check next</p><ul class="bullets">${a.next_checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
+    <p class="fine">Analyzed by <b>${esc(rp.model)}</b>, ${esc(rp.runtime || 'on your Mac')}, ${esc(fmtNY(Date.parse(rp.created)))} · ${num(rp.data?.full_days)} days of data (${esc(rp.data?.from || '—')} – ${esc(rp.data?.to || '—')}) · ${num((s.ms || 0) / 1000)} s${rp.imported ? ' · imported from a file' : ''}. Every number above was checked against the evidence; ${rej ? `${(rp.rejected || []).length} claim${rp.rejected.length === 1 ? ' was' : 's were'} removed because the evidence didn’t support ${rp.rejected.length === 1 ? 'it' : 'them'}.` : 'nothing had to be removed.'}</p>
+    ${disclosure('ai-evidence', `Evidence the AI used (${rp.evidence.length})`, `<p class="fine">Calculated on your device by the app’s tested functions; the AI only reads these results.</p><ul class="evidence">${ev}</ul>`)}
+    ${rej ? disclosure('ai-rejected', 'Claims removed by the evidence check', `<ul class="bullets">${rej}</ul>`) : ''}`;
+}
+function aiSection() {
+  const list = loadAI(), idx = Math.min(UI.aiShown ?? list.length - 1, list.length - 1), rp = list[idx];
+  const has = usageDays().length > 0;
+  let head;
+  if (LOCAL && companion?.installed) head = busy === 'ai'
+    ? `<p><b>Investigating…</b> ${esc(companion.model)} is working through your data on this Mac. This usually takes 1–3 minutes; you can keep using the app.</p>`
+    : `<p>An AI model (${esc(companion.model)}) running on this Mac investigates your electricity data with the app’s tested measurements, then every claim is checked against that evidence. Nothing leaves this computer.</p>${has ? '<button class="btn primary" data-act="ai-run">Run AI investigation</button>' : '<p class="fine">Import your Delmarva file first.</p>'}`;
+  else if (LOCAL && companion) head = `<p class="fine">${companion.ollama ? `The model ${esc(companion.model)} isn’t installed. In Terminal run: ollama pull ${esc(companion.model)}` : 'Ollama isn’t running. Open the Ollama app, then reload.'}</p>`;
+  else head = '<p class="fine">AI investigations run on your Mac with the Energy companion (it keeps your data on that computer). Bring a finished analysis here with “Import AI analysis”.</p>';
+  const hist = list.length > 1 ? disclosure('ai-history', `Previous analyses (${list.length})`, `<ul class="bullets">${list.map((r, i) => `<li><button class="link" data-act="ai-show" data-i="${i}">${esc(fmtNY(Date.parse(r.created)))} · ${esc(r.model)}${r.imported ? ' · imported' : ''}</button>${i === idx ? ' (showing)' : ''}</li>`).join('')}</ul>`) : '';
+  const io = `<div class="row2">${rp ? '<button class="btn secondary" data-act="ai-export">Save analysis file</button>' : ''}<label class="btn secondary file">Import AI analysis<input type="file" id="ai-file" accept=".json,application/json"></label></div>`;
+  return `<h2 class="section-title">AI analysis <span class="kind-chip">AI</span></h2><section class="card ai">${head}${rp ? `<hr>${aiReportHtml(rp)}` : ''}${hist}${io}</section>`;
+}
+async function runAI() {
+  busy = 'ai';
+  render();
+  try {
+    const r = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: { ...S, weatherCache: null }, temps: allTemps(), outlook: recNow().outlook }) });
+    const j = await r.json();
+    if (!r.ok || !validReport(j)) throw new Error(j.error || 'unexpected response');
+    const list = loadAI();
+    list.push(j);
+    saveAI(list);
+    UI.aiShown = undefined;
+    toast(`AI investigation done: ${j.analysis.discoveries.length} discoveries, ${j.analysis.recommendations.length} recommendations.`);
+  } catch (e) {
+    toast(`AI investigation failed: ${e.message}`, true);
+  }
+  busy = '';
+  render();
+}
+if (LOCAL) fetch('/api/companion').then((r) => (r.ok ? r.json() : null)).then((j) => { companion = j; render(); }).catch(() => {});
+
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
 
 function viewInsights() {
@@ -335,6 +391,7 @@ function viewInsights() {
   if (!days.length) {
     out.push(`<section class="card"><h2>See what’s actually working</h2><p>Import your Delmarva usage file. It’s analyzed on this device and matched with Wilmington weather automatically.</p>${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}</section>`);
     out.push(disclosure('howto', 'How to get the file from Delmarva', HOW_TO_DOWNLOAD, true));
+    out.push(aiSection());
     out.push(`<h2 class="section-title">Automatic weather review</h2><section class="card">${findingsList()}</section>`);
     out.push(`<div class="grid">${weatherLink()}</div>`);
     return out.join('');
@@ -343,6 +400,7 @@ function viewInsights() {
   if (lastImport) out.push(`<section class="card good imported"><p class="card-label"><i class="dot"></i>Import complete</p><p>${esc(lastImport)}</p></section>`);
   out.push(learnedSection(r));
   out.push(actionsCard(r));
+  out.push(aiSection());
   out.push(cantTell(r));
   out.push(`<h2 class="section-title">Automatic weather review</h2><section class="card">${findingsList()}<p class="fine">Public weather data reviewed by the cloud AI operator. It never sees your electricity data; any “for your home” line is calculated on this device.</p></section>`);
   out.push(dq.status === 'attention' ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Data coverage</p><ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>` : disclosure('coverage', 'Data coverage', `<ul class="bullets">${dq.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>`));
@@ -635,7 +693,7 @@ async function fetchJson(url) {
 /** Public weather history collected every hour in the cloud (read-only service, with this site's copy as fallback). */
 async function loadWeather() {
   const one = async (u) => { try { const r = await fetch(u, { cache: 'no-cache', signal: AbortSignal.timeout(10e3) }); return r.ok ? await r.json() : null; } catch { return null; } };
-  const get = async (f) => (await one(API + f)) ?? one(`data/weather/${f}`);
+  const get = async (f) => (LOCAL ? null : await one(API + f)) ?? one(`data/weather/${f}`); // on the Mac companion the same public files come through the companion
   const months = [...new Set([0, 4].map((d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 7)))];
   const [status, daily, skill, latest, insights, ...obs] = await Promise.all([get('status.json'), get('daily.json'), get('skill.json'), get('forecast/latest.json'), get('insights.json'), ...months.map((m) => get(`obs/${m}.json`))]);
   WD = { loaded: true, status, daily, skill, latest, insights, obs: Object.assign({}, ...obs.filter(Boolean)) };
@@ -753,6 +811,18 @@ const ACTIONS = {
     save();
     toast(`${el.dataset.label} set to ${v}° (was ${was}°). Update the thermostat from Today to use it.`);
     render();
+  },
+  'ai-run'() { if (busy !== 'ai') runAI(); },
+  'ai-show'(el) { UI.aiShown = Number(el.dataset.i); render(); },
+  async 'ai-export'() {
+    const list = loadAI(), rp = list[Math.min(UI.aiShown ?? list.length - 1, list.length - 1)];
+    if (!rp) return;
+    const name = `energy-ai-analysis-${rp.created.slice(0, 10)}.json`;
+    const file = new File([JSON.stringify(rp, null, 1)], name, { type: 'application/json' });
+    if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(file), download: name });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
   'mark-programmed'() {
     if (!confirm('Mark the current recommended schedule as programmed on your thermostat?')) return;
@@ -885,6 +955,19 @@ function homeAllDay(el) {
 document.addEventListener('change', async (e) => {
   const el = e.target;
   if (el.id === 'usage-file' && el.files.length) return importUsage([...el.files].slice(0, 24));
+  if (el.id === 'ai-file' && el.files[0]) {
+    try {
+      const rp = JSON.parse(await readFile(el.files[0]));
+      if (!validReport(rp)) throw new Error('not an Energy AI analysis file');
+      const list = loadAI();
+      if (!list.some((x) => x.created === rp.created && x.model === rp.model)) list.push({ ...rp, imported: true });
+      saveAI(list);
+      UI.aiShown = undefined;
+      render();
+      toast('AI analysis imported. It stays on this device.');
+    } catch (err) { toast(`Couldn’t import: ${err.message}`, true); }
+    return;
+  }
   if (el.id === 'backup-file' && el.files[0]) {
     try {
       const data = JSON.parse(await readFile(el.files[0]));

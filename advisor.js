@@ -463,6 +463,36 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     }
   } else cannot.push(`Unusual days — needs about 10 days to know what’s typical (have ${n}).`);
 
+  // One weekday unlike the others (≥2 of that weekday with hourly data): evenings 5–10 PM and nights 1–5 AM.
+  const WDN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const wdOf = (d) => new Date(`${d}T12:00:00Z`).getUTCDay();
+  const patterns = [];
+  if (hd.length >= 14) {
+    for (const [part, hrs, minAbs, minPct, unit] of [['evening', [17, 18, 19, 20, 21], 1, 25, 'kWh'], ['night', [1, 2, 3, 4], 0.4, 30, 'W']]) {
+      const val = (d) => sum(hrs.map((h) => d.h[h]));
+      for (let w = 0; w < 7; w++) {
+        const mine = hd.filter((d) => wdOf(d.date) === w), rest = hd.filter((d) => wdOf(d.date) !== w);
+        if (mine.length < 2 || rest.length < 6) continue;
+        const a = avg(mine.map(val)), b = avg(rest.map(val)), pct = ((a - b) / b) * 100;
+        if (a - b >= minAbs && pct >= minPct && mine.every((d) => val(d) > b)) patterns.push({ part, day: WDN[w], a, b, pct, n: mine.length, unit, hrs: hrs.length });
+      }
+    }
+  }
+  patterns.sort((p1, p2) => p2.pct - p1.pct);
+  const shown = ['evening', 'night'].map((part) => patterns.find((x) => x.part === part)).filter(Boolean);
+  for (const x of shown) {
+    const show = (v) => (x.unit === 'W' ? `${fmt((v / x.hrs) * 1000)} W` : `${fmt(v, 1)} kWh`);
+    add({ key: 'weekday', tone: 'warn', title: `${x.day} ${x.part === 'evening' ? 'evenings' : 'nights'} use ${fmt(x.pct)}% more than other days`, detail: `${x.part === 'evening' ? '5–10 PM' : '1–5 AM'} averages ${show(x.a)} on ${x.day}s vs. ${show(x.b)} on other days, on all ${x.n} ${x.day}s in your data. A weekly routine (laundry, guests, a device on a timer) usually explains this.` });
+  }
+
+  // Heaviest days vs. the weather (≥10 days with weather).
+  if (matched.length >= 10 && weather?.heat) {
+    const top = [...matched].sort((x, y) => y.kwh - x.kwh).slice(0, 3);
+    const cold = [...matched].sort((x, y) => x.temp - y.temp).slice(0, Math.max(3, Math.ceil(matched.length * 0.2))).map((d) => d.date);
+    const k = top.filter((d) => cold.includes(d.date)).length;
+    if (k >= 2) add({ key: 'heavy', title: 'Your heaviest days were your coldest days', detail: `${k} of your 3 highest-use days (${top.map((d) => `${dayName(d.date)}: ${fmt(d.kwh, 1)} kWh at ${fmt(d.temp)}°F`).join('; ')}) were among the coldest in your data — that’s heating at work, not waste.` });
+  }
+
   // Weekday vs weekend (≥14 days, ≥4 of each).
   const wkd = days.filter((d) => !C.isWeekendDate(d.date)), wke = days.filter((d) => C.isWeekendDate(d.date));
   let week = null;
@@ -504,7 +534,7 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     }
   }
 
-  const order = ['stale', 'change', 'spike', 'weather', 'similar', 'overnight', 'peak', 'week', 'season', 'range'];
+  const order = ['stale', 'change', 'weekday', 'spike', 'weather', 'heavy', 'similar', 'overnight', 'peak', 'week', 'season', 'range'];
   findings.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
   comparisons.push({ ok: n >= 3, label: 'Day-to-day comparison', detail: n >= 3 ? `${n} full days` : `needs 3 days (have ${n})` });
   comparisons.push({ ok: !!prof, label: 'Time-of-day patterns', detail: prof ? `${hd.length} day${hd.length === 1 ? '' : 's'} with hourly readings` : 'needs hourly data' });
@@ -513,7 +543,9 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
   comparisons.push({ ok: n >= 10, label: 'Unusual days', detail: n >= 10 ? 'checked' : 'needs about 10 days' });
   cannot.push('Which appliance uses what — the meter measures the whole home, so the app can point to times of day, not devices.');
   if (p.hvacMetered !== 'yes') cannot.push('How much of this is heating or cooling — it isn’t confirmed that they’re on your meter.');
-  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather };
+  const others = patterns.filter((x) => !shown.includes(x));
+  if (others.length) { const f = findings.find((x) => x.key === 'weekday' && x.title.includes(shown.find((y) => y.part === others[0].part)?.day)); if (f) f.detail += ` ${others.map((x) => `${x.day}s`).join(' and ')} show the same.`; }
+  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather, patterns: shown };
 }
 
 // ---------- personalized recommendations ----------
@@ -603,6 +635,12 @@ export function opportunities({ state, rec, model, summary, report = null }) {
   if (sp && between(sp.date, report.to) <= 21) {
     const extra = sp.kwh - sp.expected;
     push({ id: 'spike', what: `Find out what ran on ${dayName(sp.date)}`, why: `It used ${fmt(extra, 1)} kWh more than ${sp.weatherAdjusted ? 'the weather explains' : 'a typical day'}.${sp.window ? ` Most of the extra was between ${hr(sp.window.start)} and ${hr(sp.window.end)}.` : ''}`, evidence: `${fmt(sp.kwh, 1)} kWh that day vs. about ${fmt(sp.expected, 1)} expected.`, investigate: 'If it lines up with laundry, cooking, guests or a cold snap, nothing to do. If not, check for something left on at that time (space heater, oven, AC with a window open). A repeat on similar days means it’s a routine worth trimming.', impact: `If it was avoidable and happens weekly, about ${fmt(extra * 4.3)} kWh a month${money(extra * 4.3)}.`, confidence: 'medium', confidenceWhy: 'The day clearly stands out; the cause isn’t visible in whole-home data.' });
+  }
+  // A weekly pattern on one weekday.
+  const pt = report?.patterns?.[0];
+  if (pt) {
+    const extra = (pt.a - pt.b) * 4.3;
+    push({ id: 'weekday', what: `Find out what runs on ${pt.day} ${pt.part === 'evening' ? 'evenings' : 'nights'}`, why: `Every ${pt.day} in your data uses more ${pt.part === 'evening' ? 'between 5 and 10 PM' : 'between 1 and 5 AM'} than other days — a repeating routine, not a one-off.`, evidence: `${fmt(pt.a, 1)} kWh vs. ${fmt(pt.b, 1)} kWh in those hours (${pt.n} ${pt.day}s).`, investigate: pt.part === 'evening' ? `Think about what happens on ${pt.day}s (laundry, cooking for guests, a hobby). If it’s a dryer or oven, full loads and lower heat settings help; if it’s heating while everyone is home, that’s expected.` : `Something runs overnight on ${pt.day}s only — a timer, a device left on after a late evening, or heating set higher. Check before bed next ${pt.day}.`, impact: `If half of it could be avoided, about ${fmt(extra / 2, 1)} kWh a month${money(extra / 2)}.`, confidence: pt.n >= 4 ? 'medium' : 'low', confidenceWhy: `Repeats on all ${pt.n} ${pt.day}s; the cause isn’t visible in whole-home data.` });
   }
   // A recent rise.
   if (report?.change && report.change.diff > 0) {
