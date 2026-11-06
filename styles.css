@@ -371,3 +371,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #0a6
 .investigation > .btn.plain { margin-top: 10px; }
 .zone { border-top: .5px solid var(--line); margin-top: 6px; }
 .trio { display: flex; gap: 6px; } .trio input { width: 64px; }
+
+.bill-form { display: grid; gap: 8px; margin-top: 12px; }
+.bill-form input { width: 100%; }
+.normality h2 .kind-chip { font-size: 12px; }

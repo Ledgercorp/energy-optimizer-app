@@ -36,6 +36,8 @@ export function migrate(raw) {
     id: str(z.id, 20), label: str(z.label, 40) || 'Zone', hvacType: HV.includes(z.hvacType) ? z.hvacType : 'unknown', availability: z.availability in C.BUILDING_MODES ? z.availability : 'unknown',
     use: str(z.use, 60), metered: MET.includes(z.metered) ? z.metered : 'unknown', heat: temp(z.heat, dc.heat), cool: temp(z.cool, dc.cool) }));
   s.moveIn = isDate(raw?.moveIn) ? raw.moveIn : '';
+  s.bills = cleanBills(raw?.bills);
+  s.projection = raw?.projection && isMoney(+raw.projection.amount) ? { amount: +raw.projection.amount, asOf: isIso(raw.projection.asOf) ? raw.projection.asOf : '' } : null;
   s.appliedUpdates = arr(raw?.appliedUpdates).filter((x) => typeof x === 'string').slice(-20).map((x) => x.slice(0, 60));
   s.version = STATE_VERSION;
   return s;
@@ -587,7 +589,14 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
   if (p.hvacMetered !== 'yes') cannot.push('How much of this is heating or cooling — it isn’t confirmed that they’re on your meter.');
   const others = patterns.filter((x) => !shown.includes(x));
   if (others.length) { const f = findings.find((x) => x.key === 'weekday' && x.title.includes(shown.find((y) => y.part === others[0].part)?.day)); if (f) f.detail += ` ${others.map((x) => `${x.day}s`).join(' and ')} show the same.`; }
-  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather, patterns: shown, allPatterns: patterns };
+  // Compare with this household's own history before calling anything a problem.
+  const baseline = householdBaseline({ usage, temps, now });
+  if (['typical', 'return_to_typical'].includes(baseline.status) && change && change.diff > 0) {
+    findings.splice(findings.findIndex((f) => f.key === 'change'), 1);
+    change = null;
+  }
+  if (baseline.status !== 'insufficient') findings.unshift({ tone: baseline.status === 'unusually_high' ? 'warn' : 'good', prelim: false, key: 'baseline', title: baseline.headline, detail: `${baseline.lines.join(' ')}${baseline.caveats.length ? ` ${baseline.caveats[0]}` : ''}` });
+  return { level, n, from: all[0].date, to: last, readings, age, total, perDay, facts, findings, comparisons, cannot, hd, prof, night, peak, spikes, change, week, weather, baseline, patterns: shown, allPatterns: patterns };
 }
 
 // ---------- personalized recommendations ----------
@@ -1038,7 +1047,12 @@ export function eligible(inp) {
 
 /** kWh a day of a recent, weather-comparable rise (last week vs before, or last 2 weeks vs similar-weather days), else 0. */
 function risingNow(inp) {
-  const r = inp.report;
+  const r = inp.report, bl = r.baseline;
+  // Within this household's usual range (or lower), only a single unusually high part of the day is worth investigating.
+  if (bl && ['typical', 'return_to_typical', 'unusually_low'].includes(bl.status)) {
+    const w = (bl.windows || []).filter((x) => x.flag === 'high').sort((a, b) => b.recent_w - b.usual_w - (a.recent_w - a.usual_w))[0];
+    return w ? ((w.recent_w - w.usual_w) * (BLOCKS[w.name][1] - BLOCKS[w.name][0])) / 1000 : 0;
+  }
   if (r.change?.diff > 0) return r.change.diff;
   const sw = similarWeather(inp.state.usage, inp.temps || {});
   if (sw.status === 'ok' && sw.meaningful && sw.direction === 'higher') return sw.actualAvg - sw.expectedAvg;
@@ -1292,14 +1306,35 @@ export function investigation({ state, temps = {}, now = Date.now(), report = nu
   const ranked = [...hyps].filter((h) => !['out', 'outByYou', 'notsup', 'less'].includes(h.status)).sort((a, b) => order[a.status] - order[b.status] || b.score - a.score);
   const metered = state.profile.hvacMetered;
   const lead = ranked.find((h) => !(h.thermostat && metered === 'no')) || null;
-  const recommendation = lead ? recommend(pr.priority, lead, t, r, state, metered, o, ranked) : null;
+  let recommendation = lead ? recommend(pr.priority, lead, t, r, state, metered, o, ranked) : null;
+  // Within the household's usual total range, the finding is about ONE time of day against its own history, not a rise to chase.
+  const bl = r.baseline, normalTotal = pr.priority === 'change' && bl && ['typical', 'return_to_typical', 'unusually_low'].includes(bl.status);
+  const stand = normalTotal ? (bl.windows || []).filter((x) => x.flag === 'high').sort((a, b) => b.recent_w - b.usual_w - (a.recent_w - a.usual_w))[0] : null;
+  const part = (w) => w.name.replace(/ \(.*/, '');
+  let supersedes = null, title = PRIORITIES[pr.priority];
+  if (normalTotal) {
+    supersedes = { status: bl.status, text: `Earlier this was shown as “${headline}” That compares the last two weeks with a short, unusually low stretch. Against your full history, your total use is ${bl.status === 'return_to_typical' ? 'back to normal' : 'normal'}, so that framing is superseded.` };
+    title = stand ? 'One part of your day stands out' : 'Back to your usual use';
+    headline = stand ? `Your total use is normal, but ${part(stand)}s are the highest they’ve been: ${fmt(stand.recent_w)} W vs a usual ${fmt(stand.low_w)}–${fmt(stand.high_w)} W.` : bl.headline;
+    // The usual "since it started" facts compare with the low stretch before, so they are replaced by comparisons with the household's own history.
+    known.length = 0;
+    known.push(...bl.lines, ...bl.caveats.slice(0, 2).map((c) => `Limit: ${c}`));
+    if (stand) known.push('The explanations below were tested against the 4 weeks before the change, which were unusually low overall: they show what changed since then, not how afternoons compare with your usual.');
+    if (recommendation && stand) {
+      const extra = ((stand.recent_w - stand.usual_w) * (BLOCKS[stand.name][1] - BLOCKS[stand.name][0])) / 1000, rf = rateFor(state);
+      recommendation = { ...recommendation, title: `Find out what runs in the ${part(stand)}s (about ${fmt(stand.recent_w - stand.usual_w)} W above your usual)`,
+        problem: `${cap(part(stand))}s average ${fmt(stand.recent_w)} W — higher than in any earlier two weeks (usual ${fmt(stand.low_w)}–${fmt(stand.high_w)} W). Your total is normal, so this is about one time of day.`,
+        expected: `Compared with your usual ${part(stand)}s that is about ${fmt(extra, 1)} kWh a day, ${fmt(extra * 30)} kWh a month${rf.rate != null ? ` (≈ $${fmt(extra * 30 * rf.rate, 2)} at ${rf.source})` : ''} if it continues. If it is something you chose or need (cooling, equipment you use), it is normal; if you can’t account for it, it is worth tracing.` };
+    }
+  }
+  const awayFlags = unoccupiedUse({ state, now });
   const settled = hyps.filter((h) => h.status === 'likely'), fit = hyps.filter((h) => h.status === 'fits');
   const conflictNote = hyps.some((h) => h.status === 'conflict') ? ' One of your answers disagrees with the readings — worth a second look.' : '';
   const conclusion = settled.length ? `Most likely: ${settled.map((h) => h.title.toLowerCase()).join(' and ')}.${conflictNote}`
     : fit.length ? `Best fit with the readings so far: ${fit.map((h) => h.title.toLowerCase()).join(' and ')} — not confirmed yet.${conflictNote}`
       : `No explanation is settled yet.${conflictNote}`;
   const answered = qs.map(([qid, q]) => ({ qid, q, a: answerFor(state, qid, key) })).filter((x) => x.a).map(({ qid, q, a }) => ({ q: qid, text: q.text(v), value: a.value, label: optLabel(qid, a.value), source: a.source, at: a.at || null, corrected: (a.history || 1) > 1 }));
-  return { key, kind: pr.priority, title: PRIORITIES[pr.priority], headline, known, attribution, tests: t, hypotheses: hyps, question, answered, conclusion, recommendation, since: v.since };
+  return { key, kind: pr.priority, title, headline, known, attribution: normalTotal ? null : attribution, tests: t, hypotheses: hyps, question, answered, conclusion: normalTotal ? `Your total use is normal for you, so this is a question about one time of day, not a fault. ${conclusion}` : conclusion, recommendation, since: v.since, baseline: bl || null, supersedes, away: awayFlags };
 }
 
 /** $/kWh: the confirmed rate, else the average implied by the cost column of the imported Delmarva file (last 60 days). */
@@ -1484,6 +1519,8 @@ export function planMerge(local, incoming) {
     if (!l) inc('actions'); else if (JSON.stringify(l) === JSON.stringify(a)) same('actions');
     else plan.conflicts.push({ id: `action:${a.id}`, label: `“${a.title}”`, detail: `here: ${ACTION_STATUS[l.status]}${l.start ? ` since ${l.start}` : ''}; backup: ${ACTION_STATUS[a.status]}${a.start ? ` since ${a.start}` : ''}`, local: 'Keep this device’s', incoming: 'Use the backup’s' });
   }
+  const bk = (b) => `${b.end}|${b.amount}`, lb = new Set((local.bills || []).map(bk));
+  for (const b of incoming.bills || []) lb.has(bk(b)) ? same('statements') : inc('statements');
   const hk = (h) => `${h.date}|${h.fingerprint}`, lh = new Set((local.programmedHistory || []).map(hk));
   for (const h of incoming.programmedHistory || []) lh.has(hk(h)) ? same('schedule history') : inc('schedule history');
   const ok = (o) => `${o.ts}|${o.roomF}|${o.setF}`, lo = new Set((local.observations || []).map(ok));
@@ -1536,6 +1573,9 @@ export function applyMerge(local, incoming, choices = {}, plan = planMerge(local
   if (!out.programmed || (incoming.programmed && (incoming.programmed.date > out.programmed.date || (incoming.programmed.date === out.programmed.date && pick('programmed') === 'incoming')))) out.programmed = incoming.programmed || out.programmed;
   const ok = (o) => `${o.ts}|${o.roomF}|${o.setF}`, seenO = new Set(out.observations.map(ok));
   out.observations = [...out.observations, ...(incoming.observations || []).filter((o) => !seenO.has(ok(o)))].sort((a, b) => a.ts - b.ts).slice(-500);
+  const billK = (b) => `${b.end}|${b.amount}`, seenB = new Set((out.bills || []).map(billK));
+  out.bills = cleanBills([...(out.bills || []), ...(incoming.bills || []).filter((b) => !seenB.has(billK(b)))]);
+  if (!out.projection && incoming.projection) out.projection = incoming.projection;
   const zById = new Map(out.zones.map((z) => [z.id, z]));
   for (const z of incoming.zones || []) if (!zById.has(z.id) || pick(`zone:${z.id}`) === 'incoming') zById.set(z.id, z);
   out.zones = [...zById.values()].slice(0, 4);
@@ -1606,3 +1646,281 @@ export function verifyHousehold(saved, update) {
   if (update.buildingMode && saved.profile.buildingMode !== update.buildingMode) bad.push('buildingMode');
   return { ok: !bad.length, bad };
 }
+
+// ================= Household baseline: is current use unusual for THIS household? =================
+// Compares the latest two weeks with this household's own history (its usual range of two-week averages, its weather, and the same
+// season a year earlier once a year of readings exists). A return to normal after a low stretch is not a problem; a statistically
+// detectable change is not the same as an abnormal one. Everything here is computed from readings; nothing is estimated.
+
+const isoGap = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 864e5);
+const isoAdd = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
+const quant = (sorted, q) => { const i = (sorted.length - 1) * q, lo = Math.floor(i), hi = Math.ceil(i); return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo); };
+const rankIn = (sorted, v) => sorted.filter((x) => x < v).length / sorted.length;
+/** Means of every `len`-day window of complete days (windows that straddle a gap in the readings are skipped). */
+function rollingMeans(days, len, val = (d) => d.kwh) {
+  const out = [];
+  for (let i = 0; i + len <= days.length; i++) {
+    const w = days.slice(i, i + len);
+    if (isoGap(w[0].date, w[len - 1].date) > len + 1) continue;
+    out.push({ i, from: w[0].date, to: w[len - 1].date, v: avg(w.map(val)) });
+  }
+  return out;
+}
+const BASE_WIN = 14, BASE_MIN_HISTORY = 56;
+const BLOCKS = { 'night (0–6)': [0, 6], 'morning (6–12)': [6, 12], 'afternoon (12–17)': [12, 17], 'evening (17–24)': [17, 24] };
+
+/** The latest run (≥ 7 days) where the centered 7-day average stays near the household's 10th percentile and well under its middle: a temporary low stretch. */
+function lowStretch(p10, p50, days) {
+  const c7 = days.map((_, i) => avg(days.slice(Math.max(0, i - 3), i + 4).map((d) => d.kwh)));
+  const thr = p10 * 1.08;
+  let best = null, i = 0;
+  while (i < days.length) {
+    if (c7[i] > thr) { i++; continue; }
+    let j = i;
+    while (j + 1 < days.length && c7[j + 1] <= thr && isoGap(days[j].date, days[j + 1].date) <= 1) j++;
+    const run = days.slice(i, j + 1), m = avg(run.map((d) => d.kwh));
+    if (run.length >= 7 && m <= p50 * 0.9) best = { from: run[0].date, to: run[run.length - 1].date, days: run.length, kwh: r1(m) };
+    i = j + 1;
+  }
+  return best;
+}
+
+export const BASELINE_STATUS = {
+  typical: 'Typical for you', return_to_typical: 'Back to your usual', unusually_high: 'Higher than usual', unusually_low: 'Lower than usual', insufficient: 'Not enough history yet',
+};
+
+/**
+ * status: typical | return_to_typical | unusually_high | unusually_low | insufficient
+ * confidence: high (same season last year, comparable weather) · medium · low (weather not comparable or short history)
+ */
+export function householdBaseline({ usage, temps = {}, now = Date.now(), win = BASE_WIN }) {
+  const days = C.dailyTotals(usage).filter((d) => d.complete).map((d) => ({ date: d.date, kwh: d.kwh, temp: temps[d.date] }));
+  const n = days.length;
+  const base = { status: 'insufficient', confidence: 'low', n, win, caveats: [], lines: [] };
+  if (n < win + BASE_MIN_HISTORY) return { ...base, reason: 'short', headline: 'Not enough history yet to say what’s normal for you.', lines: [`You have ${n} complete day${n === 1 ? '' : 's'}; about ${win + BASE_MIN_HISTORY} (10 weeks) are needed to know your usual range. Changes seen now are early observations, not verdicts.`] };
+  const recent = days.slice(-win), hist = days.slice(0, -win);
+  if (isoGap(recent[0].date, recent[win - 1].date) > win + 2) return { ...base, reason: 'gaps', headline: 'Recent readings have gaps, so the latest two weeks can’t be compared yet.', lines: ['Import a newer file to fill the gaps.'] };
+  const H = rollingMeans(hist, win);
+  if (H.length < 20) return { ...base, reason: 'short', headline: 'Not enough history yet to say what’s normal for you.', lines: ['Your earlier readings have too many gaps to show a usual range.'] };
+  const sorted = H.map((w) => w.v).sort((a, b) => a - b);
+  const p10 = quant(sorted, 0.1), p50 = quant(sorted, 0.5), p90 = quant(sorted, 0.9);
+  const medianDay = median(hist.map((d) => d.kwh));
+  const R = avg(recent.map((d) => d.kwh)), before = hist.slice(-28), B = avg(before.map((d) => d.kwh));
+  const range = { low: r1(p10), mid: r1(p50), high: r1(p90) };
+  const stretch = lowStretch(p10, p50, hist);
+  const caveats = [];
+
+  // Weather: the earlier days at about the same outdoor temperature (±3°F). A comparison is only fair if enough earlier days are that mild/cold/hot
+  // AND they aren't themselves the unusually low stretch.
+  const rt = recent.filter((d) => Number.isFinite(d.temp)), ht = hist.filter((d) => Number.isFinite(d.temp));
+  let weather = { known: false }, weatherCaveat = null;
+  if (rt.length >= 7 && ht.length >= 28) {
+    const exp = []; let covered = 0;
+    for (const d of rt) { const m = ht.filter((x) => Math.abs(x.temp - d.temp) <= 3); if (m.length >= 3) { covered++; exp.push(avg(m.map((x) => x.kwh))); } }
+    // Days at this temperature that come from the low stretch (or the three weeks right after it) can't be a fair baseline.
+    const near = (x) => stretch && x.date >= stretch.from && x.date <= isoAdd(stretch.to, 21);
+    const matchedDays = new Set(rt.flatMap((d) => ht.filter((x) => Math.abs(x.temp - d.temp) <= 3).map((x) => x.date)));
+    const nearShare = matchedDays.size ? ht.filter((x) => matchedDays.has(x.date) && near(x)).length / matchedDays.size : 0;
+    const expected = exp.length ? avg(exp) : null, coverage = covered / rt.length, lowBase = expected != null && (expected < p10 || nearShare > 0.5);
+    weather = { known: true, recent_temp_f: r1(avg(rt.map((d) => d.temp))), history_temp_f: r1(avg(ht.map((d) => d.temp))), coolest_before_f: r0(Math.min(...ht.map((d) => d.temp))), coverage: r2(coverage),
+      expected_kwh: expected != null ? r1(expected) : null, comparable: coverage >= 0.6 && !lowBase, low_base: lowBase };
+    weatherCaveat = !weather.comparable ? (lowBase && coverage >= 0.6
+      ? `The earlier days this ${weather.recent_temp_f < weather.history_temp_f ? 'cool' : 'warm'} were mostly from your unusually low stretch and the weeks right after it, so they can’t serve as a fair baseline.`
+      : `Your earlier days were ${weather.recent_temp_f < weather.history_temp_f ? 'warmer' : 'cooler'} (${fmt(weather.history_temp_f)}°F on average vs ${fmt(weather.recent_temp_f)}°F now), with few at the same temperature, so the weather can’t be matched. A usual range from other seasons is not a weather-adjusted baseline.`) : null;
+  } else caveats.push('Outdoor temperatures are missing for part of this period, so the comparison can’t allow for the weather.');
+
+  // Same season last year, once a year of readings exists.
+  let seasonal = null;
+  if (n >= 330) {
+    const a = isoAdd(recent[0].date, -364 - 7), b = isoAdd(recent[win - 1].date, -364 + 7), ly = days.filter((d) => d.date >= a && d.date <= b);
+    if (ly.length >= 10) seasonal = { kwh: r1(avg(ly.map((d) => d.kwh))), days: ly.length, pct: r0((R / avg(ly.map((d) => d.kwh)) - 1) * 100) };
+  }
+
+  if (!seasonal && weatherCaveat) caveats.push(weatherCaveat);
+  let status, confidence = 'medium';
+  const above = R > p90 && R >= p50 * 1.15, below = R < p10 && R <= p50 * 0.85;
+  if (seasonal) {
+    status = seasonal.pct >= 20 ? 'unusually_high' : seasonal.pct <= -20 ? 'unusually_low' : 'typical';
+    const lyT = days.filter((d) => d.date >= isoAdd(recent[0].date, -364 - 7) && d.date <= isoAdd(recent[win - 1].date, -364 + 7) && Number.isFinite(d.temp)).map((d) => d.temp);
+    const dT = weather.known && lyT.length >= 7 ? Math.abs(weather.recent_temp_f - avg(lyT)) : 0;
+    confidence = dT > 8 ? 'medium' : 'high';
+    if (dT > 8) caveats.push(`This period was ${fmt(dT)}°F ${weather.recent_temp_f > avg(lyT) ? 'warmer' : 'cooler'} than the same weeks last year, which may account for part of the difference.`);
+  } else {
+    status = above ? 'unusually_high' : below ? 'unusually_low' : 'typical';
+    if (n < 330) caveats.push(`Less than a year of readings (${n} days): no same-season comparison with last year yet.`);
+  }
+  // A comparison at the same temperature can show the weather explains a high period.
+  if (!seasonal && status === 'unusually_high' && weather.comparable && weather.expected_kwh && R <= weather.expected_kwh * 1.15) { status = 'typical'; caveats.push('Days at the same temperature used about as much.'); }
+  // Back to normal after a temporary low: the low stretch ended within four weeks before this window and use is now back in range.
+  const returned = status === 'typical' && stretch && isoGap(stretch.to, recent[0].date) <= 28 && R >= stretch.kwh * 1.1 && R >= p10;
+  if (returned) status = 'return_to_typical';
+  if (!seasonal && !weather.comparable) confidence = status === 'unusually_high' || status === 'unusually_low' ? 'low' : 'medium';
+  if (!seasonal && n < 120 && confidence === 'high') confidence = 'medium';
+
+  // The same test for each part of the day: a normal total can hide one unusual period.
+  const hourly = hourlyByDay(usage, days.map((d) => d.date));
+  const windows = [];
+  if (hourly.length >= win + BASE_MIN_HISTORY) {
+    const hh = hourly.filter((d) => d.date < recent[0].date), rh = hourly.filter((d) => d.date >= recent[0].date);
+    for (const [name, [a, b]] of Object.entries(BLOCKS)) {
+      const wv = (d) => avg(d.h.slice(a, b)) * 1000, HW = rollingMeans(hh, win, wv).map((w) => w.v).sort((x, y) => x - y);
+      if (HW.length < 20 || rh.length < 7) continue;
+      const w10 = quant(HW, 0.1), w50 = quant(HW, 0.5), w90 = quant(HW, 0.9), cur = avg(rh.map(wv));
+      const flag = cur > w90 && cur >= w50 * 1.15 ? 'high' : cur < w10 && cur <= w50 * 0.85 ? 'low' : null;
+      windows.push({ name, recent_w: r0(cur), low_w: r0(w10), usual_w: r0(w50), high_w: r0(w90), rank_pct: r0(rankIn(HW, cur) * 100), flag });
+    }
+  }
+
+  const rng = `${fmt(range.low, 1)}–${fmt(range.high, 1)}`, span = `${md(recent[0].date)}–${md(recent[win - 1].date)}`;
+  const flagged = windows.filter((w) => w.flag === 'high');
+  const lines = [`Last ${win} days (${span}): ${fmt(R, 1)} kWh a day. Your usual range for two-week stretches since ${md(days[0].date)}: ${rng} (middle: ${fmt(range.mid, 1)}).`];
+  let headline;
+  if (status === 'return_to_typical') {
+    headline = `Back to your usual level: ${fmt(R, 1)} kWh a day, after an unusually low stretch.`;
+    lines.push(`The low stretch (${md(stretch.from)}–${md(stretch.to)}) averaged ${fmt(stretch.kwh, 1)} kWh a day — your lowest since ${md(days[0].date)}. Measured against it, today’s use looks like a ${fmt((R / stretch.kwh - 1) * 100)}% rise; measured against your full history, it is a return to normal, not a new problem.`);
+  } else if (status === 'typical') {
+    headline = `Typical for you: ${fmt(R, 1)} kWh a day, inside your usual range.`;
+    if (Math.abs(R - B) >= 0.1 * B) lines.push(`The 4 weeks before averaged ${fmt(B, 1)} — ordinary swings between stretches.`);
+  } else if (status === 'unusually_high') {
+    headline = seasonal ? `Higher than usual: ${fmt(R, 1)} kWh a day, ${seasonal.pct}% above the same time last year.` : `Higher than anything in your history: ${fmt(R, 1)} kWh a day (usual ${rng}).`;
+  } else {
+    headline = seasonal ? `Lower than usual: ${fmt(R, 1)} kWh a day, ${Math.abs(seasonal.pct)}% below the same time last year.` : `Lower than usual: ${fmt(R, 1)} kWh a day (usual ${rng}). Mild weather or time away often explains it; it isn’t a problem.`;
+  }
+  if (seasonal) lines.push(`Same time last year (${seasonal.days} days): ${fmt(seasonal.kwh, 1)} kWh a day.`);
+  if (weather.known && weather.comparable && weather.expected_kwh) lines.push(`Earlier days at about the same temperature (${fmt(weather.recent_temp_f)}°F): ${fmt(weather.expected_kwh, 1)} kWh a day.`);
+  for (const w of flagged) lines.push(`${cap(w.name.replace(/ \(.*/, ''))}s are the highest in your history: ${fmt(w.recent_w)} W on average, vs a usual ${fmt(w.low_w)}–${fmt(w.high_w)} W. Your total is ${status === 'unusually_high' ? 'high' : 'normal'}; this one period stands out.`);
+  return { status, label: BASELINE_STATUS[status], confidence, headline, lines, caveats, n, win, recent: { from: recent[0].date, to: recent[win - 1].date, kwh: r1(R) }, before_kwh: r1(B), range, low_stretch: stretch, weather, seasonal, windows, p: { p10: r1(p10), p50: r1(p50), p90: r1(p90) } };
+}
+
+// ---------- usage while the apartment is normally empty ----------
+
+QUESTIONS.away_home = {
+  kinds: ['away'], scope: 'key',
+  text: (v) => `Was anyone home, or was something running on a timer, on ${v.dates || 'those afternoons'}?`,
+  why: 'Whole-home readings can show that something used power while the apartment was supposed to be empty, but not what it was. Your answer tells us whether it was a change of plans.',
+  options: [['home', 'Someone was home'], ['timer', 'Something runs on a timer or schedule then'], ['no', 'No — nobody was home and I know of nothing'], ['unknown', 'I’m not sure']],
+  effect: {},
+};
+
+/**
+ * Hours the routine says nobody is home vs. what the meter shows. Compares the latest occurrences with this household's own earlier ones
+ * and with a quiet night. It never says what ran: cooling, a timer, laundry or a visitor would all look alike in hourly readings.
+ */
+export function unoccupiedUse({ state, now = Date.now() }) {
+  const p = state.profile, out = [];
+  const hourly = hourlyByDay(state.usage, C.dailyTotals(state.usage).map((d) => d.date));
+  if (hourly.length < 28) return out;
+  const byDate = new Map(hourly.map((d) => [d.date, d]));
+  const dow = (iso) => C.DOW[new Date(`${iso}T12:00:00Z`).getUTCDay()];
+  const nightW = median(hourly.map((d) => avg(d.h.slice(1, 5)) * 1000));
+  for (const day of C.DOW) {
+    const r = C.routineFor(p.routine, day);
+    if (!r.leave || !r.back) continue;
+    const h0 = Math.ceil(C.toMin(r.leave) / 60), h1 = Math.floor(C.toMin(r.back) / 60);
+    if (h1 - h0 < 1) continue;
+    const occ = hourly.filter((d) => dow(d.date) === day).map((d) => ({ date: d.date, w: avg(d.h.slice(h0, h1)) * 1000 }));
+    if (occ.length < 6) continue;
+    const recent = occ.slice(-4), earlier = occ.slice(0, -4);
+    if (earlier.length < 4) continue;
+    const typical = median(earlier.map((o) => o.w)), cut = Math.max(typical * 1.5, typical + 800);
+    const hi = recent.filter((o) => o.w > cut);
+    const otherDays = hourly.filter((d) => dow(d.date) !== day && d.date >= recent[0].date).map((d) => avg(d.h.slice(h0, h1)) * 1000);
+    const key = `away:${day}:${recent[recent.length - 1].date}`;
+    const answer = answerFor(state, 'away_home', key);
+    const flagged = hi.length >= 2;
+    out.push({
+      id: `away-${day}`, day, key, window: `${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}`, flagged, explained: !!(answer && ['home', 'timer'].includes(answer.value)), answer: answer?.value || null,
+      recent: recent.map((o) => ({ date: o.date, w: r0(o.w) })), earlier_typical_w: r0(typical), quiet_night_w: r0(nightW), other_days_same_hours_w: otherDays.length ? r0(avg(otherDays)) : null,
+      headline: flagged ? `${C.DAY_NAME[day]} ${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)}, when nobody’s home, used ${fmt(Math.min(...hi.map((o) => o.w)) / 1000, 1)}–${fmt(Math.max(...hi.map((o) => o.w)) / 1000, 1)} kW on ${hi.length} of the last ${recent.length} ${C.DAY_NAME[day]}s.`
+        : `${C.DAY_NAME[day]} ${C.fmtMin(h0 * 60)}–${C.fmtMin(h1 * 60)} (nobody home) looks consistent with earlier weeks.`,
+      detail: `Earlier ${C.DAY_NAME[day]}s averaged about ${fmt(typical)} W in these hours; the latest ${recent.length}: ${recent.map((o) => `${md(o.date)} ${fmt(o.w)} W`).join(', ')}. A quiet night draws about ${fmt(nightW)} W${otherDays.length ? `, and the same hours on other days (when people are home) average ${fmt(avg(otherDays))} W` : ''}.`,
+      uncertainty: 'Hourly whole-home readings can’t say what ran. Cooling, a timer, laundry, a dehumidifier or someone being home would look the same, and the app doesn’t assume it is the air conditioning.',
+      check: `Next ${C.DAY_NAME[day]}, look at what is running at ${C.fmtMin(h0 * 60)}: thermostat (HOLD or schedule), anything on a timer, and whether the building’s cooling is active. Then import the new readings and see whether it repeats.`,
+      question: flagged && !answer ? { id: 'away_home', key, text: QUESTIONS.away_home.text({ dates: hi.map((o) => md(o.date)).join(', ').replace(/, ([^,]*)$/, ' and $1') }), why: QUESTIONS.away_home.why, options: QUESTIONS.away_home.options } : null,
+    });
+  }
+  return out.filter((o) => o.flagged);
+}
+
+// ---------- bills: what is measured, what is estimated, what is only a statement or a projection ----------
+
+const isMoney = (x) => Number.isFinite(x) && x >= 0 && x < 100000;
+/** Sanitize user-entered statements: { id, start?, end, kwh?, amount }. Nothing is inferred for missing fields. */
+export function cleanBills(list) {
+  return (Array.isArray(list) ? list : []).filter((b) => b && isIso(b.end) && isMoney(+b.amount)).slice(-60).map((b) => ({
+    id: String(b.id || `${b.end}|${b.amount}`).slice(0, 60), start: isIso(b.start) ? b.start : '', end: b.end, kwh: Number.isFinite(+b.kwh) && +b.kwh > 0 ? +b.kwh : null, amount: +b.amount, at: isIso(b.at) ? b.at : '' }))
+    .sort((a, b) => (a.end < b.end ? -1 : 1));
+}
+
+/**
+ * Month-by-month and statement-by-statement view of the electricity bill. Sources are kept apart:
+ *  measured kWh (the readings) · interval-cost estimate (the file's per-hour costs: not a statement) · statements you entered · a projection you entered.
+ * Billing dates are never guessed: without statements the app shows calendar months and rolling 30-day stretches and says so.
+ */
+export function billView({ state, now = Date.now() }) {
+  const days = C.dailyTotals(state.usage).filter((d) => d.complete);
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const missing = [], lines = [];
+  const costOf = (ds) => (ds.length && ds.every((d) => d.cost != null) ? sum(ds.map((d) => d.cost)) : null);
+  // calendar months
+  const months = {};
+  for (const d of days) (months[d.date.slice(0, 7)] ||= []).push(d);
+  const monthRows = Object.entries(months).map(([m, ds]) => {
+    const [y, mo] = m.split('-').map(Number), dim = new Date(Date.UTC(y, mo, 0)).getUTCDate(), kwh = sum(ds.map((d) => d.kwh)), cost = costOf(ds);
+    return { month: m, days: ds.length, daysInMonth: dim, partial: ds.length < dim, kwh: r1(kwh), kwh_per_day: r1(kwh / ds.length), interval_cost: cost != null ? r2(cost) : null, cents_per_kwh: cost != null && kwh ? r2((cost / kwh) * 100) : null };
+  });
+  // rolling 30-day stretches ending at the latest reading (not billing periods)
+  const stretches = [];
+  if (days.length >= 30) {
+    const last = days[days.length - 1].date;
+    for (let k = 0; k < 3; k++) {
+      const to = isoAdd(last, -30 * k), from = isoAdd(to, -29), ds = days.filter((d) => d.date >= from && d.date <= to);
+      if (ds.length >= 28) stretches.push({ from, to, days: ds.length, kwh: r1(sum(ds.map((d) => d.kwh))), interval_cost: costOf(ds) != null ? r2(costOf(ds)) : null });
+    }
+  }
+  // How the latest 30 days compare with every other 30-day stretch in the readings (not billing periods).
+  let thirty = null;
+  if (days.length >= 60) {
+    const W30 = [];
+    for (let i = 0; i + 30 <= days.length; i++) { const w = days.slice(i, i + 30); if (isoGap(w[0].date, w[29].date) === 29) W30.push({ from: w[0].date, to: w[29].date, kwh: sum(w.map((d) => d.kwh)), cost: costOf(w) }); }
+    if (W30.length >= 10) {
+      const k = W30.map((w) => w.kwh).sort((a, b) => a - b), latest = W30[W30.length - 1], lowest = W30.reduce((m, w) => (w.kwh < m.kwh ? w : m));
+      thirty = { typical_kwh: r0(quant(k, 0.5)), low_kwh: r0(k[0]), high_kwh: r0(k[k.length - 1]), latest: { ...latest, kwh: r0(latest.kwh) }, lowest: { ...lowest, kwh: r0(lowest.kwh), cost: lowest.cost != null ? r2(lowest.cost) : null }, n: W30.length,
+        latest_vs_typical_pct: r0((latest.kwh / quant(k, 0.5) - 1) * 100) };
+    }
+  }
+  const bills = cleanBills(state.bills);
+  const statements = bills.map((b) => {
+    const ds = b.start ? days.filter((d) => d.date >= b.start && d.date <= b.end) : [], billed = b.start ? isoGap(b.start, b.end) + 1 : null;
+    const covered = !!b.start && ds.length === billed, cost = covered ? costOf(ds) : null, kwh = covered ? sum(ds.map((d) => d.kwh)) : null;
+    return { ...b, billed_days: billed, readings_days: ds.length, covered, readings_kwh: kwh != null ? r1(kwh) : null, interval_cost: cost != null ? r2(cost) : null,
+      other_charges: cost != null ? r2(b.amount - cost) : null, kwh_gap_pct: kwh != null && b.kwh ? r1((b.kwh / kwh - 1) * 100) : null,
+      note: !b.start ? 'No start date entered, so it can’t be matched to readings.' : !covered ? `Your readings cover ${ds.length} of its ${billed} days.` : null };
+  });
+  if (!bills.length) missing.push('Your Delmarva statements (service dates, billed days, kWh, total, and the fixed-charge/tax lines). Without them the app can’t say which dates each bill covers.');
+  else if (statements.some((s) => !s.covered)) missing.push('Readings for every day of some statements, or their start dates, so those statements can’t be reconciled.');
+  missing.push('Delmarva’s own projection is only shown if you enter it; the app never forecasts a bill amount.');
+  const proj = state.projection && isMoney(+state.projection.amount) ? { amount: +state.projection.amount, asOf: isIso(state.projection.asOf) ? state.projection.asOf : '' } : null;
+  // What the figures say, source by source.
+  if (bills.length >= 2) {
+    const a = statements[statements.length - 2], b = statements[statements.length - 1];
+    const dAmt = b.amount - a.amount, ea = a.kwh && a.billed_days ? a.amount / a.kwh : null;
+    lines.push({ kind: 'statement', text: `Statements you entered: ${money(a.amount)} (ending ${md(a.end)}) then ${money(b.amount)} (ending ${md(b.end)}) — ${dAmt >= 0 ? 'up' : 'down'} ${money(Math.abs(dAmt))}.` });
+    if (a.kwh && b.kwh && a.billed_days && b.billed_days) lines.push({ kind: 'statement', text: `Per billed day: ${money(a.amount / a.billed_days)} → ${money(b.amount / b.billed_days)}; kWh per day ${fmt(a.kwh / a.billed_days, 1)} → ${fmt(b.kwh / b.billed_days, 1)}.${ea ? ` Of the ${money(Math.abs(dAmt))} change, about ${money((b.kwh - a.kwh) * ea)} comes from the kWh difference at the earlier statement’s average price; the rest is price, days or other charges.` : ''}` });
+  }
+  const covered = statements.filter((s) => s.covered);
+  if (covered.length) lines.push({ kind: 'reconciled', text: `Matching ${covered.length} statement${covered.length === 1 ? '' : 's'} to your readings: the statement total minus the readings’ per-hour costs was ${covered.map((s) => money(s.other_charges)).join(', ')}. That difference can be fixed charges, taxes, fees, a different rate or credits; the file can’t split it.` });
+  if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection you entered: ${money(proj.amount)}${proj.asOf ? ` (as of ${md(proj.asOf)})` : ''}. It is the utility’s number, not the app’s.` });
+  if (thirty) {
+    const t = thirty, near = Math.abs(t.latest_vs_typical_pct) < 8;
+    lines.push({ kind: 'measured', text: `Measured: any 30 days in your readings used ${fmt(t.low_kwh)}–${fmt(t.high_kwh)} kWh (typical ${fmt(t.typical_kwh)}). The latest 30 days (${md(t.latest.from)}–${md(t.latest.to)}): ${fmt(t.latest.kwh)} kWh — ${near ? 'about typical' : `${fmt(Math.abs(t.latest_vs_typical_pct))}% ${t.latest_vs_typical_pct > 0 ? 'above' : 'below'} typical`}.` });
+    lines.push({ kind: 'measured', text: `Your lightest 30 days were ${md(t.lowest.from)}–${md(t.lowest.to)}: ${fmt(t.lowest.kwh)} kWh${t.lowest.cost != null ? ` (about ${money(t.lowest.cost)} by the file’s per-hour costs)` : ''}. A bill whose dates fall mostly in a stretch like that would come in lower than usual; which bill that is depends on your billing dates, which the file doesn’t contain.` });
+  }
+  if (stretches.length >= 2) {
+    const [c, p] = stretches, dk = c.kwh - p.kwh;
+    lines.push({ kind: 'measured', text: `Measured: the latest 30 days (${md(c.from)}–${md(c.to)}) used ${fmt(c.kwh)} kWh vs ${fmt(p.kwh)} in the 30 before — ${dk >= 0 ? 'more' : 'less'} by ${fmt(Math.abs(dk))} kWh (${fmt(Math.abs(dk / p.kwh) * 100)}%). These are rolling stretches, not billing periods.` });
+    if (c.interval_cost != null && p.interval_cost != null) lines.push({ kind: 'estimate', text: `Estimate from the file’s per-hour costs: ${money(c.interval_cost)} vs ${money(p.interval_cost)}. This is not a bill: it leaves out fixed charges, taxes and credits, and the file’s own totals aren’t verified against a statement.` });
+  }
+  return { months: monthRows, stretches, thirty, statements, projection: proj, lines, missing, hasStatements: bills.length > 0 };
+}
+const money = (x) => `$${fmt(x, 2)}`;
