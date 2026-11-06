@@ -167,7 +167,7 @@ const TABS = [['today', 'Today'], ['bills', 'Bills'], ['savings', 'Savings'], ['
 const pagehead = (h, eyebrow = '') => `<header class="pagehead"><div>${eyebrow ? `<p class="eyebrow">${eyebrow}</p>` : ''}<h1>${h}</h1></div></header>`;
 const back = (href, label) => `<a class="back" href="#${href}">‹ ${label}</a>`;
 const disclosure = (id, summary, body, open = false) => `<details class="disclosure" data-id="${id}" ${open || UI.open?.[id] ? 'open' : ''}><summary>${summary}</summary><div class="disc-body">${body}</div></details>`;
-const importButton = (label = 'Import Delmarva file') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".zip,.csv,.xml,application/zip,text/csv,text/xml,application/xml"></label>`;
+const importButton = (label = 'Import Delmarva file (usage or billing .zip)') => `<label class="btn primary file">${label}<input type="file" id="usage-file" multiple accept=".zip,.csv,.xml,application/zip,text/csv,text/xml,application/xml"></label>`;
 const HOW_TO_DOWNLOAD = `<ol class="steps"><li>Sign in to <b>Delmarva My Account</b>.</li><li>Open <b>My Usage</b> → <b>Green Button: Download my data</b>.</li><li>Choose the longest date range and download <b>CSV</b> (or XML).</li><li>Come back and tap <b>Import Delmarva file</b>. The rest is automatic.</li></ol><p class="fine">Delmarva doesn’t let personal apps fetch usage without your password, and this app never asks for it. The file stays on this device.</p>`;
 const keys = (t) => esc(t)
   .replace(/\b(MENU|RUN|DONE|HOME|NEXT)\b/g, '<kbd class="key">$1</kbd>')
@@ -618,19 +618,21 @@ function viewBills() {
   const bv = A.billView({ state: S, temps: allTemps() });
   const d = stmtDraft?.fields || {}, v = (k) => (d[k] == null || d[k] === '' ? '' : esc(String(d[k]))), flag = (k) => (stmtDraft && !stmtDraft.editingId ? (stmtDraft.found.includes(k) ? ' <small class="found">read from the PDF — check it</small>' : ' <small>not found in the PDF</small>') : '');
   const monthRows = bv.months.map((m) => `<tr><td>${esc(new Date(`${m.month}-15T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }))}${m.partial ? ` <small>(${m.days} of ${m.daysInMonth} days)</small>` : ''}</td><td class="t">${num(m.kwh)}</td><td class="t">${num(m.kwh_per_day, 1)}</td><td class="t">${m.interval_cost != null ? money(m.interval_cost) : '—'}</td></tr>`).join('');
-  const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(from PDF)</small>' : ''}${x.statementDate ? ` <small>billed ${esc(shortDate(x.statementDate))}</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.cost_per_day != null ? money(x.cost_per_day) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td><td class="t">${x.cents_per_kwh != null ? num(x.cents_per_kwh, 1) + '¢' : '—'}</td></tr>
-    <tr class="sub"><td colspan="7">${x.readings_kwh != null ? `<small>Your readings for the same days: ${num(x.readings_kwh)} kWh${x.kwh_matches === false ? ' — more than rounding apart' : x.kwh_matches ? ' — matches' : ''}.</small> ` : ''}${x.fixed != null ? `<small>Fixed ${money(x.fixed)}.</small> ` : ''}${x.credits ? `<small>Credits ${money(x.credits)}.</small> ` : ''}${x.priorBalance != null || x.payments != null ? `<small>Previous balance/payments are kept out of comparisons.</small> ` : ''}${x.notes.map((n) => `<small>${esc(n)}</small>`).join(' ')} <button class="link" data-act="bill-edit" data-id="${esc(x.id)}">Correct</button> · <button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove</button></td></tr>`).join('');
+  const st = bv.statements.slice().reverse().map((x) => `<tr><td>${x.start ? esc(shortDate(x.start)) : '?'}–${esc(shortDate(x.end))}${x.source === 'pdf' ? ' <small>(statement PDF)</small>' : x.source === 'greenbutton' ? ' <small>(Delmarva billing data)</small>' : ' <small>(entered)</small>'}${x.statementDate ? ` <small>billed ${esc(shortDate(x.statementDate))}</small>` : ''}</td><td class="t">${money(x.amount)}</td><td class="t">${x.billed_days ?? '—'}</td><td class="t">${x.kwh ? num(x.kwh) : '—'}</td><td class="t">${x.kwh_per_day != null ? num(x.kwh_per_day, 1) : '—'}</td></tr>
+    <tr class="sub"><td colspan="5">${x.cost_per_day != null ? `<small>${money(x.cost_per_day)} a day${x.cents_per_kwh != null ? ` · ${num(x.cents_per_kwh, 1)}¢ per kWh on average` : ''}.</small> ` : ''}${x.readings_kwh != null ? `<small>Your readings for the same days: ${num(x.readings_kwh, 2)} kWh${x.kwh_within_rounding ? ' — matches (billed kWh are whole numbers)' : x.kwh_matches === false ? ' — more than rounding apart' : x.kwh_matches ? ' — matches' : ''}; the file’s hourly costs ${money(x.interval_cost)}, ${money(Math.abs(x.beyond_readings))} ${x.beyond_readings >= 0 ? 'less' : 'more'} than the billed amount — not itemised, so not explained.</small> ` : ''}${x.fixed != null ? `<small>Fixed ${money(x.fixed)}.</small> ` : ''}${x.credits ? `<small>Credits ${money(x.credits)}.</small> ` : ''}${x.priorBalance != null || x.payments != null ? `<small>Previous balance/payments are kept out of comparisons.</small> ` : ''}${x.notes.map((n) => `<small>${esc(n)}</small>`).join(' ')} <button class="link" data-act="bill-edit" data-id="${esc(x.id)}">Correct</button> · <button class="link" data-act="bill-remove" data-id="${esc(x.id)}">Remove</button></td></tr>`).join('');
   const drivers = bv.compare ? `<section class="card"><p class="card-label">Why the last bill changed</p><p>${money(bv.compare.prev.amount)} → ${money(bv.compare.cur.amount)} (${bv.compare.total >= 0 ? '+' : '−'}${money(Math.abs(bv.compare.total))})</p><ul class="bullets">${bv.compare.drivers.map((x) => `<li>${esc(x.label)}${x.amount != null ? `: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}` : ''} <small>(${x.status === 'confirmed' ? 'from your statements' : x.status === 'possible' ? 'possible, not measured' : x.status === 'unknown' ? 'can’t compare' : 'not explained by the figures entered'})</small></li>`).join('')}</ul>${bv.compare.typical_cost_per_day != null ? `<p class="fine">Your earlier statements cost about ${money(bv.compare.typical_cost_per_day)} a day (median).</p>` : ''}</section>` : '';
   const proj = bv.projection, est = bv.estimate;
-  return `${head}
+  const review = pendingBilling.length ? `<section class="card warn"><p class="card-label"><i class="dot"></i>Needs your review</p>${pendingBilling.map((r, i) => `<p><b>${esc(shortDate(r.incoming.start))}–${esc(shortDate(r.incoming.end))}</b>: the new export says ${money(r.incoming.amount)}, ${num(r.incoming.kwh)} kWh; saved: ${esc(shortDate(r.existing.start || r.existing.end))}–${esc(shortDate(r.existing.end))} ${money(r.existing.amount)}${r.existing.kwh ? `, ${num(r.existing.kwh)} kWh` : ''} (${r.existing.source === 'greenbutton' ? 'earlier billing export' : r.existing.source === 'pdf' ? 'statement PDF' : 'entered by you'}). ${r.kind === 'changed' ? 'Possibly a corrected bill.' : 'The dates overlap.'}</p><div class="row2"><button class="btn primary" data-act="billing-take" data-i="${i}">Use the new figures</button><button class="btn secondary" data-act="billing-keep" data-i="${i}">Keep the saved one</button></div>`).join('')}</section>` : '';
+  return `${head}${review}
     <section class="card"><p class="card-label">What will the bill be?</p>
       ${proj ? `<p><b>${money(proj.amount)}</b> <span class="kind-chip">Delmarva projection · entered by you</span>${proj.asOf ? ` <small>as of ${esc(shortDate(proj.asOf))}</small>` : ''} <button class="link" data-act="proj-clear">Remove</button></p>` : ''}
       ${est ? `<p><b>${money(est.low)}–${money(est.high)}</b> <span class="kind-chip">App estimate</span></p><p class="fine">${esc(est.method)}</p>` : ''}
       ${!proj && !est ? `<p>No estimate yet: the app needs at least one statement with dates, kWh and charges. It never presents the file’s per-hour costs as a bill.</p>` : ''}
+      ${bv.statements.some((x) => x.source === 'greenbutton') ? '<p class="fine">Billing periods marked “Delmarva billing data” come from your Green Button billing export: amounts as Delmarva reports them, not checked against a statement PDF.</p>' : ''}
       ${bv.usual ? `<p class="fine">You told us your bill is usually ${money(bv.usual.low)}–${money(bv.usual.high)}.</p>` : ''}</section>
     ${drivers}
     <h2 class="section-title">Your statements</h2><section class="card">
-      ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Service period</th><th class="t">Charges</th><th class="t">Days</th><th class="t">kWh</th><th class="t">$/day</th><th class="t">kWh/day</th><th class="t">¢/kWh</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements yet. Add one below — from the PDF on your Mac, or by typing a few numbers.</p>'}
+      ${bv.statements.length ? `<div class="table-wrap"><table><thead><tr><th>Service period</th><th class="t">Charges</th><th class="t">Days</th><th class="t">kWh</th><th class="t">kWh/day</th></tr></thead><tbody>${st}</tbody></table></div>` : '<p>No statements yet. Add one below — from the PDF on your Mac, or by typing a few numbers.</p>'}
       ${LOCAL ? `<label class="btn secondary file">Read a statement PDF<input type="file" id="statement-pdf" accept="application/pdf"></label><p class="fine">Read on this Mac only (macOS PDFKit); nothing is uploaded. Scanned PDFs have no text to read — type those figures in.</p>` : '<p class="fine">PDF reading works in the Mac companion; on the phone, type the figures.</p>'}
       ${stmtDraft?.editingId ? `<p class="fine"><b>Correcting the statement ending ${esc(shortDate(stmtDraft.fields.end))}.</b> Saving replaces it; you can undo from Settings.</p>` : stmtDraft ? `<p class="fine"><b>From ${esc(stmtDraft.name)}:</b> found ${stmtDraft.found.length} item${stmtDraft.found.length === 1 ? '' : 's'}. Check every field against the statement before saving.</p>` : ''}
       <div class="bill-form"><label class="item"><span>Service start date${flag('start')}</span><input type="date" id="bill-start" value="${v('start')}"></label><label class="item"><span>Service end date${flag('end')}</span><input type="date" id="bill-end" value="${v('end')}"></label>
@@ -1273,6 +1275,12 @@ const ACTIONS = {
     render(); document.getElementById('bill-end')?.scrollIntoView({ block: 'center' });
   },
   'bill-draft-clear'() { stmtDraft = null; render(); },
+  'billing-take'(el) {
+    const r = pendingBilling[+el.dataset.i]; if (!r) return;
+    try { commitAndReload({ ...S, bills: A.cleanBills([...(S.bills || []).filter((b) => b.id !== r.existing.id), r.incoming]) }, 'billing correction'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    pendingBilling.splice(+el.dataset.i, 1); render(); toast('Replaced with the new figures. You can undo from Settings.');
+  },
+  'billing-keep'(el) { pendingBilling.splice(+el.dataset.i, 1); render(); toast('Kept the saved billing period.'); },
   'th-save'() {
     const prev = S.profile.thermostat || {}, v = (id) => document.getElementById(id);
     const t = A.cleanThermostat({ ...prev, mode: S.profile.buildingMode === 'heat_available' ? 'heat' : 'cool', setpoint: +v('th-set')?.value, hold: !!v('th-hold')?.checked, programming: v('th-prog')?.value, confirmed: todayIso() });
@@ -1420,6 +1428,7 @@ document.addEventListener('toggle', (e) => {
   if (d.matches?.('details.disclosure')) { UI.open = { ...UI.open, [d.dataset.id]: d.open }; saveUI(); }
 }, true);
 
+let pendingBilling = [], billingImported = false; // billing periods from an export that need a decision
 async function importUsage(files) {
   busy = 'import';
   render();
@@ -1435,9 +1444,22 @@ async function importUsage(files) {
   for (const f of files) {
     try {
       const res = C.importUsageFile(f.name, f.text ?? await readFile(f.file));
+      if (res.kind === 'billing') { // Delmarva's billing-data export: billing periods, kept with your statements — never mixed into readings
+        const plan = A.planBillingImport(S.bills || [], res.periods, { today: todayIso() });
+        if (plan.add.length) commitAndReload({ ...S, bills: A.cleanBills([...(S.bills || []), ...plan.add]) }, 'billing data');
+        pendingBilling = [...pendingBilling.filter((r) => !plan.review.some((x) => x.incoming.id === r.incoming.id)), ...plan.review];
+        msgs.push(`Billing data: ${plan.add.length} billing period${plan.add.length === 1 ? '' : 's'} added${plan.same ? `, ${plan.same} already saved` : ''}${plan.review.length ? `, ${plan.review.length} need your review on Bills (different figures or overlapping dates)` : ''}`);
+        billingImported = true;
+        continue;
+      }
+      // Readings: new ones are added, identical ones are skipped, and a reading that would change a saved value is held back (never overwritten silently).
+      const key = (r) => (r.hour != null ? `${r.date}T${String(r.hour).padStart(2, '0')}` : r.date);
+      const merged = C.mergeUsage({ hourly: {}, daily: {}, cost: {} }, res.records);
+      const changed = [...Object.entries(merged.hourly).filter(([k, v]) => S.usage.hourly[k] != null && Math.abs(S.usage.hourly[k] - v) > 1e-9), ...Object.entries(merged.daily).filter(([k, v]) => S.usage.daily[k] != null && Math.abs(S.usage.daily[k] - v) > 1e-9)].map(([k]) => k);
+      const keep = changed.length ? res.records.filter((r) => !changed.includes(key(r))) : res.records;
       const before = S.usage;
-      S.usage = C.mergeUsage(S.usage, res.records); // merges by hour/day: never deletes history, never double-counts a re-import
-      msgs.push(`${files.length > 1 ? `${f.name}: ` : 'Imported '}${A.importSummary(before, S.usage, res).message}`);
+      S.usage = C.mergeUsage(S.usage, keep); // merges by hour/day: never deletes history, never double-counts a re-import
+      msgs.push(`${files.length > 1 ? `${f.name}: ` : 'Imported '}${A.importSummary(before, S.usage, res).message}${changed.length ? ` ${changed.length} reading${changed.length === 1 ? '' : 's'} differed from what’s saved and ${changed.length === 1 ? 'was' : 'were'} not changed` : ''}`);
     } catch (err) {
       bad = true;
       msgs.push(`Couldn’t import ${files.length > 1 ? f.name : 'that file'}: ${err.message}`);
@@ -1446,9 +1468,11 @@ async function importUsage(files) {
   save();
   const days = usageDays(), temps = allTemps();
   const matched = days.filter((d) => Number.isFinite(temps[d.date])).length;
-  const msg = `${msgs.map((m) => m.replace(/\.$/, '')).join('. ')}.${!bad && days.length ? ` ${matched} day${matched === 1 ? '' : 's'} matched with weather.` : ''}`;
-  toast(bad ? msg : `${msg} Your report is ready.`, bad && msgs.length === 1);
-  if (msgs.length > (bad ? 1 : 0) && days.length) {
+  const onlyBilling = msgs.every((m) => /Billing data:/.test(m));
+  const msg = `${msgs.map((m) => m.replace(/\.$/, '')).join('. ')}.${!bad && days.length && !onlyBilling ? ` ${matched} day${matched === 1 ? '' : 's'} matched with weather.` : ''}`;
+  toast(bad || onlyBilling ? msg : `${msg} Your report is ready.`, bad && msgs.length === 1);
+  if (billingImported && !files.some((f) => !/billing/i.test(f.name))) { location.hash = 'bills'; billingImported = false; }
+  else if (msgs.length > (bad ? 1 : 0) && days.length) {
     lastImport = msg;
     if (route() !== 'insights') location.hash = 'insights';
     window.scrollTo(0, 0);

@@ -385,6 +385,26 @@ export function importGreenButton(xml) {
   const sig = (x) => x.rows.map((r) => `${r.start}:${r.val}`).join(',');
   const kept = energy.filter((x, i) => energy.findIndex((y) => sig(y) === sig(x)) === i);
   if (kept.length < energy.length) notes.push('a duplicate copy of the readings was ignored');
+  const BILL = 20 * 86400;
+  const longRows = kept.flatMap((x) => x.rows).filter((r) => r.dur >= BILL);
+  if (longRows.length && longRows.length === kept.flatMap((x) => x.rows).length) {
+    // A billing-data export: one reading per billing period (start, length, kWh, the billed amount). Same unit check as usage, on price only.
+    const periods = [];
+    for (const { rt: t, rows } of kept) {
+      const priced = rows.filter((r) => r.cost > 0 && r.val > 0), price = (scale) => (priced.length ? priced.reduce((a, r) => a + r.cost, 0) / priced.reduce((a, r) => a + r.val * scale, 0) : null);
+      const okB = (scale) => rows.every((r) => (r.val * scale) / (r.dur / 86400) <= 1200) && (price(scale) == null || (price(scale) >= 0.03 && price(scale) <= 1));
+      const declared = 10 ** t.mult / 1000, scale = [declared, 1 / 1000, 10 ** -t.mult / 1000].find(okB) ?? declared;
+      if (scale !== declared) notes.push(`values read as watt-hours (the file’s ×10^${t.mult} scale tag doesn’t match its usage and costs)`);
+      for (const r of rows) {
+        const ms = r.start * 1000, start = wallClock ? new Date(ms).toISOString().slice(0, 10) : localParts(ms).date, days = Math.round(r.dur / 86400);
+        const last = new Date(Date.parse(`${start}T12:00:00Z`) + (days - 1) * 864e5).toISOString().slice(0, 10);
+        periods.push({ start, end: last, days, kwh: Math.round(r.val * scale * 1000) / 1000, amount: r.cost != null ? Math.round(r.cost * 100) / 100 : null });
+      }
+    }
+    if (!periods.length) throw new Error('The billing file had no readable billing periods.');
+    return { kind: 'billing', records: [], periods: periods.sort((a, b) => (a.start < b.start ? -1 : 1)), skipped, notes };
+  }
+  if (longRows.length) { notes.push(`${longRows.length} reading(s) spanning a whole billing period were left out of usage`); for (const x of kept) x.rows = x.rows.filter((r) => r.dur < BILL); }
   const records = [];
   for (const { rt: t, rows } of kept) {
     const hourly = rows.filter((r) => r.dur <= 3600 && r.val > 0).map((r) => r.val).sort((x, y) => x - y);
@@ -409,7 +429,7 @@ export function importGreenButton(xml) {
       if (records.filter((r) => r.date === d && r.hour === 1).length === 1) notes.push(`on ${d} (clocks fell back) the file lists one 1 AM hour, not two, so that day may be about an hour short`);
     }
   }
-  return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: kept.some((x) => x.rt.uom == null), notes };
+  return { kind: 'usage', records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: kept.some((x) => x.rt.uom == null), notes };
 }
 
 /**
