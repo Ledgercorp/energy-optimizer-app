@@ -258,7 +258,8 @@ function viewToday() {
   const rec = recNow();
   const st = A.todayStatus(S, rec);
   const inv = st.kind === 'setup' ? null : invNow();
-  const main = [hero(st, rec), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), zonesCard(), programCard(st, rec)];
+  const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
+  const main = [hh, hero(st, rec), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
@@ -407,20 +408,25 @@ if (LOCAL) fetch('/api/companion').then((r) => (r.ok ? r.json() : null)).then((j
 // ---------- Investigation (runs on this device; answers and actions stay here) ----------
 
 const invNow = () => A.investigation({ state: S, temps: allTemps() });
-const STATUS_CLASS = { likely: 'good', fits: 'good', possible: '', open: '', conflict: 'warn', unlikely: 'out', out: 'out' };
-function questionHtml(inv, q, current = null) {
-  return `<div class="ask"><p class="card-label">One question that could help</p><p><b>${esc(q.text)}</b></p><p class="fine">${esc(q.why)}</p>
+const STATUS_CLASS = { likely: 'good', fits: 'good', possible: '', open: '', conflict: 'warn', less: 'out', notsup: 'out', unlikely: 'out', out: 'out', outByYou: 'out' };
+function questionHtml(inv, q, current = null, label = 'One question that could help') {
+  return `<div class="ask"><p class="card-label">${esc(label)}</p><p><b>${esc(q.text)}</b></p><p class="fine">${esc(q.why)}</p>
     <div class="answers">${q.options.map(([v, l]) => `<button class="btn ${current === v ? 'primary' : 'secondary'}" data-act="answer" data-q="${q.id}" data-v="${v}" data-key="${esc(inv.key)}">${esc(l)}</button>`).join('')}</div></div>`;
 }
 /** Compact card for Today; the full page is #investigate. */
 function investigationCard(inv) {
   if (!inv?.hypotheses?.length) return '';
   const rec = inv.recommendation;
-  return `<section class="card investigation"><p class="card-label"><i class="dot"></i>We found something worth investigating</p><h2>${esc(inv.headline)}</h2>
+  const live = inv.hypotheses.filter((h) => !['out', 'outByYou', 'notsup', 'less'].includes(h.status));
+  const gone = inv.hypotheses.filter((h) => ['out', 'outByYou', 'notsup'].includes(h.status));
+  const lead = live.find((h) => h.id === rec?.hypothesis) || live[0];
+  return `<section class="card investigation"><p class="card-label"><i class="dot"></i>What changed in your electricity use</p><h2>${esc(inv.headline)}</h2>
     <p class="fine">${esc(inv.known[0] || '')}</p>
-    <p class="card-label">What might explain it</p><ul class="hyps">${inv.hypotheses.map((h) => `<li class="${STATUS_CLASS[h.status]}"><span>${esc(h.title)}</span><em>${esc(h.label)}</em></li>`).join('')}</ul>
-    ${inv.question ? questionHtml(inv, inv.question) : ''}
-    ${rec ? `<div class="next"><p class="card-label">What you can do now</p><b>${esc(rec.title)}</b><p class="fine">${esc(rec.expected)}</p></div>` : ''}
+    <p class="card-label">What we’re investigating</p><ul class="hyps">${live.map((h) => `<li class="${STATUS_CLASS[h.status]}"><span>${esc(h.title)}</span><em>${esc(h.label)}</em></li>`).join('')}</ul>
+    ${gone.length ? `<p class="fine">Set aside: ${gone.map((h) => `${esc(h.title.toLowerCase())} (${esc(h.label.toLowerCase())})`).join('; ')}.</p>` : ''}
+    <p class="fine">${esc(inv.conclusion)}</p>
+    ${rec || lead ? `<div class="next"><p class="card-label">What you can check</p>${rec ? `<b>${esc(rec.title)}</b><p class="fine">${esc(rec.expected)}</p>` : ''}${lead?.verify ? `<p class="fine">${esc(lead.verify)}</p>` : ''}</div>` : ''}
+    ${inv.question ? questionHtml(inv, inv.question, null, 'One question') : '<p class="fine">No open questions right now.</p>'}
     <a class="btn plain" href="#investigate">Open the investigation ›</a></section>`;
 }
 /** After the move-in date: one line per thermostat zone. Before it, nothing (never applied to earlier history). */
@@ -458,7 +464,8 @@ function viewInvestigate() {
   const att = inv.attribution ? `<div class="table-wrap"><table><thead><tr><th>When</th><th class="t">Extra kWh a day</th><th class="t">Share</th></tr></thead><tbody>${inv.attribution.map((a) => `<tr><td>${esc(a.window)}</td><td class="t">${num(a.kwh, 1)}</td><td class="t">${a.share}%</td></tr>`).join('')}</tbody></table></div>` : '';
   const hyps = inv.hypotheses.map((h) => `<li class="${STATUS_CLASS[h.status]}"><b>${esc(h.title)}</b><span class="kind-tag">${esc(h.label)}</span>
     ${h.for.length ? `<span><i>Fits:</i> ${h.for.map(esc).join(' · ')}</span>` : ''}${h.against.length ? `<span><i>Against:</i> ${h.against.map(esc).join(' · ')}</span>` : ''}
-    ${h.status !== 'out' ? `<span><i>How to check:</i> ${esc(h.check)}</span>` : ''}</li>`).join('');
+    ${h.missing?.length && !['out', 'outByYou'].includes(h.status) ? `<span><i>Still unknown:</i> ${h.missing.map(esc).join(' · ')}</span>` : ''}
+    ${!['out', 'outByYou'].includes(h.status) ? `<span><i>How to check:</i> ${esc(h.check)}</span>` : ''}</li>`).join('');
   const answers = inv.answered.length ? `<ul class="bullets">${inv.answered.map((a) => `<li>${esc(a.text)} — <b>${esc(a.label)}</b>${a.source === 'settings' ? ' (from Settings)' : a.at ? ` (${esc(shortDate(a.at))}${a.corrected ? ', corrected' : ''})` : ''} <button class="link" data-act="reask" data-q="${a.q}">Change</button></li>`).join('')}</ul>` : '<p class="fine">No answers yet.</p>';
   const rec = inv.recommendation;
   const tracked = (S.actions || []).find((x) => rec && x.id === `${inv.key}:${rec.hypothesis}`);
@@ -479,6 +486,73 @@ function viewInvestigate() {
     <h2 class="section-title">Your answers</h2><section class="card">${answers}</section>
     ${acts ? `<h2 class="section-title">Things you’re trying</h2><section class="card"><ul class="findings actions">${acts}</ul><p class="fine">Results compare the days after you started with the 4 weeks before. “Consistent with an improvement” is not proof — other changes at home also count.</p></section>` : ''}
     ${LOCAL ? '<p class="fine center"><a href="#insights">Ask the AI on this Mac to weigh these explanations ›</a></p>' : ''}`;
+}
+
+
+// ---------- Restore & merge (never silently replaces data) ----------
+
+let pendingRestore = null; // { name, kind, state?, meta?, aiReports?, plan?, update?, choices }
+let lastCommit = null;     // { what, verified, at }
+const hasSnapshot = () => { try { return !!localStorage.getItem('aeo.snapshot'); } catch { return false; } };
+/** Write `next` as one verified transaction (safety copy first), then reload it from storage. */
+function commitAndReload(next, reason) {
+  A.commitState(localStorage, KEY, next, { reason });
+  S = A.migrate(JSON.parse(localStorage.getItem(KEY)));
+  lastCommit = { what: reason, verified: true, at: Date.now() };
+}
+async function openRestoreFile(f) {
+  try {
+    const parsed = A.parseBackup(await readFile(f));
+    pendingRestore = parsed.kind === 'household' ? { name: f.name, kind: 'household', update: parsed.update } : { name: f.name, ...parsed, plan: A.planMerge(S, parsed.state), choices: {} };
+    location.hash = 'restore';
+    render();
+  } catch (err) { toast(`Couldn’t open that file: ${err.message}`, true); }
+}
+function householdPreviewHtml(update, source) {
+  const pv = A.previewHousehold(S, update);
+  return `<section class="card household"><p class="card-label"><i class="dot"></i>Confirmed household routine${source ? ` · ${esc(source)}` : ''}</p>
+    <h2>${pv.applied ? 'Already applied on this device' : 'Apply your confirmed household routine?'}</h2>
+    ${update.note ? `<p>${esc(update.note)}</p>` : ''}
+    <div class="table-wrap"><table><thead><tr><th>Day</th><th>Now in the app</th><th>After</th></tr></thead><tbody>${pv.lines.map((l) => `<tr class="${l.changed ? 'changed' : ''}"><td>${esc(l.day)}</td><td>${esc(l.now)}</td><td>${esc(l.next)}</td></tr>`).join('')}</tbody></table></div>
+    ${pv.season ? `<p>Building season: ${esc(seasonName(pv.season.now) || pv.season.now)} → <b>${esc(seasonName(pv.season.next) || pv.season.next)}</b></p>` : ''}
+    ${pv.answers.length ? `<p class="fine">Also records your answers: ${pv.answers.map(esc).join('; ')}.</p>` : ''}
+    <p class="fine">Comfort temperatures stay as they are. This updates the app only — the thermostat on the wall isn’t connected; if the schedule changes, Today shows the steps to program it by hand. A copy of your current data is saved first, and you can undo.</p>
+    ${pv.applied ? '' : `<div class="row2"><button class="btn primary" data-act="apply-household">Apply confirmed routine</button><button class="btn secondary" data-act="restore-cancel">Not now</button></div>`}</section>`;
+}
+function applyHouseholdNow(update) {
+  const inv = invNow();
+  const next = A.applyHousehold(S, update, { investigationKey: inv?.key || '', today: todayIso() });
+  try {
+    commitAndReload(next, 'household routine');
+    const v = A.verifyHousehold(S, update);
+    if (!v.ok) throw new Error(`these didn’t save as intended: ${v.bad.join(', ')}`);
+    lastCommit.what = 'household routine';
+    if (LOCAL) fetch('/api/household-update/applied', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: update.id, verified: true, days: C.DOW.map((d) => [d, S.profile.routine.days[d]]) }) }).catch(() => {});
+    toast('Routine saved and verified on this device. The thermostat itself is unchanged — see Today for programming steps.');
+  } catch (err) { toast(`Not applied: ${err.message} Your data is unchanged.`, true); }
+  pendingRestore = null; householdUpdate = null;
+  location.hash = 'today';
+  render();
+}
+let householdUpdate = null; // offered by the Mac companion when a confirmed update is waiting
+if (LOCAL) fetch('/api/household-update').then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.kind === 'aeo-household-update') { try { householdUpdate = A.parseBackup(JSON.stringify(j)).update; render(); } catch { /* invalid: ignore */ } } }).catch(() => {});
+function viewRestore() {
+  const head = `${back('settings', 'Settings')}${pagehead('Restore or merge', pendingRestore ? esc(pendingRestore.name) : '')}`;
+  if (!pendingRestore) return `${head}<section class="card"><p>Choose a backup in Settings → Privacy and backup.</p></section>`;
+  if (pendingRestore.kind === 'household') return `${head}${householdPreviewHtml(pendingRestore.update, 'from a file')}`;
+  const { plan, meta } = pendingRestore;
+  const adds = Object.entries(plan.add).map(([k, n]) => `<li>${n} ${esc(k)}</li>`).join('');
+  const sames = Object.entries(plan.same).map(([k, n]) => `<li>${n} ${esc(k)} already here</li>`).join('');
+  const conf = plan.conflicts.map((c) => {
+    const cur = pendingRestore.choices[c.id] || c.default || 'local';
+    return `<li><b>${esc(c.label)}</b><span class="fine">${esc(c.detail)}</span><div class="seg" role="group" aria-label="${esc(c.label)}"><button data-act="restore-choice" data-id="${esc(c.id)}" data-v="local" aria-pressed="${cur === 'local'}">${esc(c.local)}</button><button data-act="restore-choice" data-id="${esc(c.id)}" data-v="incoming" aria-pressed="${cur === 'incoming'}">${esc(c.incoming)}</button></div></li>`;
+  }).join('');
+  return `${head}<section class="card"><p class="fine">Backup${meta?.exportedAt ? ` saved ${esc(fmtNY(Date.parse(meta.exportedAt)))}` : ''}${meta?.device ? ` on device ${esc(meta.device)}` : ''}. Checked and readable.</p>
+    ${plan.empty ? '<h2>Nothing new — everything in this backup is already here.</h2>' : `<p class="card-label">Will be added</p><ul class="bullets">${adds || '<li>Nothing new</li>'}</ul>`}
+    ${sames ? `<p class="card-label">Already on this device (kept once)</p><ul class="bullets">${sames}</ul>` : ''}</section>
+    ${conf ? `<h2 class="section-title">Needs your choice</h2><section class="card"><ul class="findings conflicts">${conf}</ul><p class="fine">Nothing is decided for you: unless you pick otherwise, this device’s value is kept.</p></section>` : ''}
+    <section class="card"><div class="row2"><button class="btn primary" data-act="restore-merge">${plan.empty ? 'Done' : 'Merge — keep everything'}</button><button class="btn secondary" data-act="restore-cancel">Cancel</button></div>
+    <p class="fine">A copy of this device’s data is saved first; you can undo from Settings. <button class="link" data-act="restore-replace">Replace everything with this backup instead…</button></p></section>`;
 }
 
 const weatherLink = () => `<a class="card" href="#weather"><p class="card-label">Weather</p><h2>Forecast and history</h2><p>Measured and forecast temperatures for ${LOC.name}.</p></a>`;
@@ -666,7 +740,7 @@ function viewSettings() {
   const right = `
     ${group('Electricity data', 'Used only on this device to measure what’s working.', `<div class="item"><span>Latest data</span><span class="value">${days.length ? `${esc(dayLabel(days[days.length - 1].date))} · ${days.length} days` : 'None yet'}</span></div><div class="item col">${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}<details class="inline"><summary>How to get the file from Delmarva</summary>${HOW_TO_DOWNLOAD}</details></div>${days.length ? '<button class="item danger" data-act="clear-usage">Delete electricity data</button>' : ''}`)}
     ${zonesGroup()}
-    ${group('Privacy and backup', 'Your settings and electricity data stay on this device. The app only downloads public weather for Wilmington; nothing personal is sent anywhere.', `<div class="item col"><div class="row2"><button class="btn primary" data-act="export">Save backup</button><label class="btn secondary file">Restore backup<input type="file" id="backup-file" accept=".json,application/json"></label></div><p class="fine">A backup file lets you restore everything later or move to a new phone.</p></div>`)}
+    ${group('Privacy and backup', 'Your settings and electricity data stay on this device. The app only downloads public weather for Wilmington; nothing personal is sent anywhere.', `<div class="item col"><div class="row2"><button class="btn primary" data-act="export">Save backup</button><label class="btn secondary file">Restore or merge<input type="file" id="backup-file" accept=".json,application/json"></label></div><p class="fine">Moving between your Mac and iPhone: save a backup on one, then “Restore or merge” on the other. You’ll see what will be added and choose anything that conflicts; nothing is replaced unless you ask.</p>${hasSnapshot() ? '<button class="btn plain" data-act="undo-last">Undo the last merge, restore or routine update</button>' : ''}</div>`)}
     ${disclosure('advanced', 'Advanced', advanced)}
     ${IOS && !STANDALONE ? '<p class="fine center">Install: tap Share → Add to Home Screen. The installed app keeps its own data, separate from Safari.</p>' : ''}`;
   return `${pagehead('Settings')}${savedBanner()}<div class="settings-cols"><div class="stack">${left}</div><div class="stack">${right}</div></div>`;
@@ -766,9 +840,9 @@ function viewProgram() {
 
 // ---------- rendering ----------
 
-const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule, investigate: viewInvestigate };
-const PARENT = { investigate: 'insights', weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
-const TITLES = { investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
+const ROUTES = { today: viewToday, insights: viewInsights, settings: viewSettings, setup: viewSetup, program: viewProgram, weather: viewWeather, usage: viewUsage, savings: viewSavings, schedule: viewSchedule, investigate: viewInvestigate, restore: viewRestore };
+const PARENT = { restore: 'settings', investigate: 'insights', weather: 'insights', usage: 'insights', savings: 'insights', schedule: 'today' };
+const TITLES = { restore: 'Restore or merge', investigate: 'Investigation', setup: 'Setup', program: 'Program thermostat', weather: 'Weather', usage: 'Electricity use', savings: 'Savings', schedule: 'Weekly schedule' };
 const route = () => { const h = location.hash.slice(1); return ROUTES[h] ? h : 'today'; };
 
 function render() {
@@ -966,6 +1040,32 @@ const ACTIONS = {
     noteSaved(v === 'days' ? 'routine: each day separately' : 'routine: weekdays + weekends');
     render();
   },
+  'restore-choice'(el) { if (pendingRestore) { pendingRestore.choices[el.dataset.id] = el.dataset.v; render(); } },
+  'restore-cancel'() { pendingRestore = null; if (householdUpdate && route() === 'today') householdUpdate = { ...householdUpdate, dismissed: true }; location.hash = route() === 'restore' ? 'settings' : route(); render(); },
+  'restore-merge'() {
+    const p = pendingRestore;
+    if (!p) return;
+    try {
+      const merged = A.applyMerge(S, p.state, p.choices, p.plan);
+      commitAndReload(merged, 'merge');
+      const ai = loadAI(), seen = new Set(ai.map((r) => `${r.created}|${r.model}`));
+      saveAI([...ai, ...(p.aiReports || []).filter((r) => validReport(r) && !seen.has(`${r.created}|${r.model}`))]);
+      toast(p.plan.empty ? 'Nothing new to add.' : 'Merged and verified — saved on this device. You can undo from Settings.');
+    } catch (err) { toast(`Merge not saved: ${err.message} Your data is unchanged.`, true); }
+    pendingRestore = null; location.hash = 'settings'; render();
+  },
+  'restore-replace'() {
+    const p = pendingRestore;
+    if (!p || !confirm('Replace ALL data on this device with this backup? Readings, answers and settings that exist only here will be removed. A copy is saved first so you can undo.')) return;
+    try { commitAndReload(p.state, 'replace'); toast('Replaced and verified. You can undo from Settings.'); } catch (err) { toast(`Not replaced: ${err.message} Your data is unchanged.`, true); }
+    pendingRestore = null; location.hash = 'settings'; render();
+  },
+  'undo-last'() {
+    if (!confirm('Undo the last merge, restore or routine update? This device goes back to the copy saved just before it.')) return;
+    try { const snap = A.undoLast(localStorage, KEY); S = A.migrate(JSON.parse(localStorage.getItem(KEY))); toast(`Undone — back to your data from ${fmtNY(Date.parse(snap.at))}, verified.`); } catch (err) { toast(err.message, true); }
+    render();
+  },
+  'apply-household'() { const u = pendingRestore?.update || householdUpdate; if (u) applyHouseholdNow(u); },
   'zone-add'() {
     const n = (S.zones || []).length;
     if (n >= 4) return;
@@ -997,7 +1097,8 @@ const ACTIONS = {
   'copy-support'() { navigator.clipboard?.writeText(SUPPORT_MSG).then(() => toast('Message copied.'), () => toast('Select the text and copy it.', true)); },
   async export() {
     const name = `energy-backup-${todayIso()}.json`;
-    const file = new File([JSON.stringify({ ...S, weatherCache: null }, null, 2)], name, { type: 'application/json' });
+    UI.device = UI.device || Math.random().toString(36).slice(2, 8); saveUI();
+    const file = new File([JSON.stringify({ ...S, weatherCache: null, meta: { app: 'energy-optimizer', schema: A.STATE_VERSION, exportedAt: new Date().toISOString(), device: UI.device }, aiReports: loadAI() }, null, 2)], name, { type: 'application/json' });
     if (navigator.canShare?.({ files: [file] })) { // iPhone: share sheet → Save to Files
       try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; }
     }
@@ -1125,19 +1226,7 @@ document.addEventListener('change', async (e) => {
     } catch (err) { toast(`Couldn’t import: ${err.message}`, true); }
     return;
   }
-  if (el.id === 'backup-file' && el.files[0]) {
-    try {
-      const data = JSON.parse(await readFile(el.files[0]));
-      if (!data || !data.profile || ![1, 2].includes(data.version)) throw new Error('not an Energy app backup');
-      S = A.migrate(data);
-      save();
-      render();
-      toast('Backup restored.');
-    } catch (err) {
-      toast(`Couldn’t restore: ${err.message}`, true);
-    }
-    return;
-  }
+  if (el.id === 'backup-file' && el.files[0]) return openRestoreFile(el.files[0]);
   if (el.dataset.actionStatus || el.dataset.actionStart) {
     const a = (S.actions || []).find((x) => x.id === (el.dataset.actionStatus || el.dataset.actionStart));
     if (!a) return;
