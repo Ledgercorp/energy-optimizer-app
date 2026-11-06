@@ -211,6 +211,7 @@ export function importSummary(before, after, res) {
   if (res.duplicates) parts.push(`${res.duplicates} repeated reading${res.duplicates === 1 ? '' : 's'} ignored`);
   if (res.conflicts?.length) parts.push(`${res.conflicts.length} day${res.conflicts.length === 1 ? '' : 's'} had conflicting readings (first kept)`);
   if (res.skipped) parts.push(`${res.skipped} unreadable row${res.skipped === 1 ? '' : 's'} skipped`);
+  for (const n of res.notes || []) parts.push(n);
   return { from: dates[0], to: dates[dates.length - 1], added, updated, same, message: parts.join(', ') };
 }
 
@@ -404,6 +405,10 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     night = { w: w(prof.slice(1, 5)), base: Math.min(...prof) * 1000, eve: w(prof.slice(17, 22)), nights: hd.length };
     night.steady = night.w <= night.base * 1.25;
     peak = peakWindow(prof);
+    // Always-on load: the quietest hour on mild nights (55–68°F), when heating and cooling are least likely to run.
+    const mild = hourlyByDay(usage, days.map((d) => d.date)).filter((d) => temps[d.date] >= 55 && temps[d.date] <= 68).map((d) => Math.min(...d.h) * 1000);
+    night.alwaysOn = mild.length >= 7 ? median(mild) : night.base;
+    night.mildNights = mild.length;
   }
   facts.push({ v: `${fmt(total, total < 100 ? 1 : 0)} kWh`, l: `used in ${n} full day${n === 1 ? '' : 's'}` });
   facts.push({ v: `${fmt(perDay, 1)} kWh`, l: 'a day on average' });
@@ -415,8 +420,8 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     add({ key: 'peak', title: `Your busiest hours are ${hr(peak.start)}–${hr(peak.end)}`, detail: `${fmt(peak.share * 100)}% of a typical day’s electricity (about ${fmt(peak.kwh, 1)} kWh) is used in those three hours${homeEve ? ', when you’re usually home — cooking, lights, laundry and heating or cooling add up' : ''}.${early(hd.length)}`, prelim: hd.length < 14 });
   }
   if (night) {
-    const month = (night.base / 1000) * 24 * 30;
-    add({ key: 'overnight', title: `Overnight your home draws about ${fmt(night.w)} W`, detail: `That’s what keeps running while you sleep. ${night.steady ? 'It stays steady through the night, which points to always-on devices (fridge, router, standby electronics) rather than something cycling.' : `It rises and falls during the night (lowest hour ${fmt(night.base)} W), which points to something that cycles — heating or cooling, a fridge or a dehumidifier.`} Use ${night.eve > night.w ? `drops ${fmt((1 - night.w / night.eve) * 100)}% from the evening (${fmt(night.eve)} W)` : 'is about the same as in the evening'}. The always-on part alone is about ${fmt(month)} kWh a month${kwhMoney(month)}.${early(night.nights)}`, prelim: night.nights < 7 });
+    const month = (night.alwaysOn / 1000) * 24 * 30;
+    add({ key: 'overnight', title: `Overnight your home draws about ${fmt(night.w)} W`, detail: `That’s what keeps running while you sleep. ${night.steady ? 'It stays steady through the night, which points to always-on devices (fridge, router, standby electronics) rather than something cycling.' : `It rises and falls during the night (lowest hour ${fmt(night.base)} W), which points to something that cycles — heating or cooling, a fridge or a dehumidifier.`} Use ${night.eve > night.w ? `drops ${fmt((1 - night.w / night.eve) * 100)}% from the evening (${fmt(night.eve)} W)` : 'is about the same as in the evening'}. ${night.mildNights >= 7 ? `On mild nights, when heating and cooling rest, the floor is about ${fmt(night.alwaysOn)} W — the truly always-on part, about ${fmt(month)} kWh a month${kwhMoney(month)}${night.alwaysOn <= 220 ? ', typical for an apartment' : ''}.` : `The always-on part alone is about ${fmt(month)} kWh a month${kwhMoney(month)}.`}${early(night.nights)}`, prelim: night.nights < 7 });
   } else cannot.push('Time-of-day patterns — your file has daily totals only. Delmarva’s “Download my data” offers hourly (or 15-minute) data; choose that for overnight and busiest-hour findings.');
 
   // Day to day.
@@ -437,8 +442,8 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     const tl = Math.min(...matched.map((d) => d.temp)), th = Math.max(...matched.map((d) => d.temp));
     const note = pre ? ` Preliminary — ${k} days with measured weather; firmer after about 30.` : '';
     weather = { heat: real(heat) ? heat : null, cool: real(cool) ? cool : null, r2: fit.r2, n: k, prelim: pre };
-    if (weather.heat) add({ key: 'weather', title: pre ? 'Early sign: your use rises on colder days' : 'Your electricity use rises on colder days', detail: `About ${fmt(heat.per * 10, 1)} kWh more a day for every 10°F colder than 65°F (±${fmt(1.96 * heat.se * 10, 1)}), from ${k} days between ${fmt(tl)}°F and ${fmt(th)}°F. Weather explains ${fmt(Math.max(0, fit.r2) * 100)}% of your day-to-day differences, so heating settings matter here.${note}`, prelim: pre });
-    if (weather.cool) add({ key: 'weather', title: pre ? 'Early sign: your use rises on hotter days' : 'Your electricity use rises on hotter days', detail: `About ${fmt(cool.per * 10, 1)} kWh more a day for every 10°F hotter than 65°F (±${fmt(1.96 * cool.se * 10, 1)}), from ${k} days between ${fmt(tl)}°F and ${fmt(th)}°F. Cooling settings matter here.${note}`, prelim: pre });
+    if (weather.heat) add({ key: 'weather', title: pre ? 'Early sign: your use rises on colder days' : 'Your electricity use rises on colder days', detail: `About ${fmt(heat.per * 10, 1)} kWh more a day for every 10°F colder than 65°F (±${fmt(1.96 * heat.se * 10, 1)}), from ${k} days between ${fmt(tl)}°F and ${fmt(th)}°F. Weather explains ${fmt(Math.max(0, fit.r2) * 100)}% of your day-to-day differences${fit.r2 >= 0.3 ? ', so heating settings matter here' : ' — a real but modest effect; other things move your use more'}.${note}`, prelim: pre });
+    if (weather.cool) add({ key: 'weather', title: pre ? 'Early sign: your use rises on hotter days' : 'Your electricity use rises on hotter days', detail: `About ${fmt(cool.per * 10, 1)} kWh more a day for every 10°F hotter than 65°F (±${fmt(1.96 * cool.se * 10, 1)}), from ${k} days between ${fmt(tl)}°F and ${fmt(th)}°F. Weather explains ${fmt(Math.max(0, fit.r2) * 100)}% of your day-to-day differences${fit.r2 >= 0.3 ? ', so cooling settings matter here' : ' — a real but modest effect; other things move your use more'}.${note}`, prelim: pre });
     if (!weather.heat && !weather.cool) {
       if (!fit.feats.length || th - tl < 8) cannot.push(`How weather affects your use — outdoor temperatures have stayed between ${fmt(tl)}°F and ${fmt(th)}°F, too narrow to tell.`);
       else add({ key: 'weather', title: 'Outdoor temperature barely changes your electricity use', detail: `Across ${k} days from ${fmt(tl)}°F to ${fmt(th)}°F, temperature explains only ${fmt(Math.max(0, fit.r2) * 100)}% of the day-to-day differences.${p.hvacMetered === 'yes' ? ' Heating and cooling settings are unlikely to move your bill much.' : ' Heating and cooling may not be on your apartment’s meter — then thermostat changes won’t show on your bill.'}${note}`, prelim: pre });
@@ -453,7 +458,7 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
     spikes = days.slice(-45).map((d) => {
       const mt = useFit && mm.get(d.date);
       const expected = mt ? Math.max(0, fit.predict(mt)) : med;
-      const over = mt ? d.kwh - expected > Math.max(2.5 * fit.se, 0.25 * expected) : d.kwh - med > Math.max(3.5 * mad, 0.4 * med);
+      const over = (mt ? d.kwh - expected > Math.max(2.5 * fit.se, 0.25 * expected) : d.kwh - med > Math.max(3.5 * mad, 0.4 * med)) || d.kwh >= 1.6 * med;
       return over ? { date: d.date, kwh: d.kwh, expected, weatherAdjusted: !!mt } : null;
     }).filter(Boolean).sort((a, b) => (b.kwh - b.expected) - (a.kwh - a.expected)).slice(0, 2);
     for (const s of spikes) {
@@ -525,12 +530,16 @@ export function usageReport({ state, temps = {}, now = Date.now() }) {
   // Seasons (≥60 days): months with at least 20 full days.
   if (n >= 60) {
     const byM = {};
-    for (const d of days) (byM[d.date.slice(0, 7)] ||= []).push(d.kwh);
-    const months = Object.entries(byM).filter(([, v]) => v.length >= 20).map(([m, v]) => ({ m, avg: avg(v) }));
+    for (const d of days) (byM[d.date.slice(0, 7)] ||= []).push(d);
+    const months = Object.entries(byM).filter(([, v]) => v.length >= 20).map(([m, v]) => ({ m, avg: avg(v.map((d) => d.kwh)), t: avg(v.map((d) => temps[d.date]).filter(Number.isFinite)) }));
     if (months.length >= 2) {
       const hi = months.reduce((a, x) => (x.avg > a.avg ? x : a)), lo = months.reduce((a, x) => (x.avg < a.avg ? x : a));
       const mname = (m) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-      if (hi.avg > 1.15 * lo.avg) add({ key: 'season', title: `${mname(hi.m)} was your heaviest month`, detail: `${fmt(hi.avg, 1)} kWh a day vs. ${fmt(lo.avg, 1)} in ${mname(lo.m)}, your lightest — ${fmt((hi.avg / lo.avg - 1) * 100)}% more.${weather?.heat || weather?.cool ? ' The weather relationship above explains much of that.' : ''}` });
+      if (hi.avg > 1.15 * lo.avg) add({ key: 'season', title: `${mname(hi.m)} was your heaviest month`, detail: `${fmt(hi.avg, 1)} kWh a day vs. ${fmt(lo.avg, 1)} in ${mname(lo.m)}, your lightest — ${fmt((hi.avg / lo.avg - 1) * 100)}% more. ${(() => {
+        // Does the weather direction actually explain the gap? Heating: heavier month should be colder; cooling: hotter.
+        const dT = hi.t - lo.t, coolExpl = weather?.cool && dT >= 3, heatExpl = weather?.heat && dT <= -3;
+        return hi.t == null || lo.t == null ? '' : coolExpl || heatExpl ? `The weather explains much of that (${fmt(hi.t)}°F vs ${fmt(lo.t)}°F average).` : `Weather doesn’t explain it: ${mname(hi.m)} averaged ${fmt(hi.t)}°F and ${mname(lo.m)} ${fmt(lo.t)}°F. Time away, guests, or a change in settings or routine are more likely.`;
+      })()}` });
     }
   }
 
@@ -624,9 +633,9 @@ export function opportunities({ state, rec, model, summary, report = null }) {
     }
   }
   // Always-on load.
-  if (report?.night && report.night.base >= 200) {
-    const b = report.night.base, month = (b / 1000) * 24 * 30;
-    push({ id: 'standby', what: 'Cut always-on power', why: `About ${fmt(b)} W runs even in your quietest hour — ${fmt(month)} kWh a month, ${fmt((month / 30 / report.perDay) * 100)}% of your use. Many apartments idle at 100–200 W.`, evidence: `Quietest hourly average across ${report.night.nights} day${report.night.nights === 1 ? '' : 's'} of hourly readings.`, investigate: 'Before bed, switch off or unplug what doesn’t need to run overnight (TV boxes, game consoles, chargers, a second fridge or dehumidifier). After a week, import a new file: the 1–5 AM readings show whether it dropped.', impact: `Every 50 W switched off saves about 36 kWh a month${money(36)}.`, confidence: report.night.nights >= 7 ? 'high' : 'medium', confidenceWhy: report.night.nights >= 7 ? 'Consistent across a week or more of nights.' : 'From only a few nights so far.', thermostat: p.hvacMetered !== 'no' && !report.night.steady ? 'No reprogramming needed (if heating or cooling cycles overnight, the overnight setting also counts)' : null });
+  if (report?.night && (report.night.alwaysOn ?? report.night.base) >= 250) {
+    const b = report.night.alwaysOn ?? report.night.base, month = (b / 1000) * 24 * 30;
+    push({ id: 'standby', what: 'Cut always-on power', why: `About ${fmt(b)} W runs even in your quietest hour — ${fmt(month)} kWh a month, ${fmt((month / 30 / report.perDay) * 100)}% of your use. Many apartments idle at 100–200 W.`, evidence: report.night.mildNights >= 7 ? `Median quietest hour on ${report.night.mildNights} mild nights (55–68°F), when heating and cooling rest.` : `Quietest hourly average across ${report.night.nights} day${report.night.nights === 1 ? '' : 's'} of hourly readings.`, investigate: 'Before bed, switch off or unplug what doesn’t need to run overnight (TV boxes, game consoles, chargers, a second fridge or dehumidifier). After a week, import a new file: the 1–5 AM readings show whether it dropped.', impact: `Every 50 W switched off saves about 36 kWh a month${money(36)}.`, confidence: report.night.nights >= 7 ? 'high' : 'medium', confidenceWhy: report.night.nights >= 7 ? 'Consistent across a week or more of nights.' : 'From only a few nights so far.', thermostat: p.hvacMetered !== 'no' && !report.night.steady ? 'No reprogramming needed (if heating or cooling cycles overnight, the overnight setting also counts)' : null });
   } else if (!report?.night && summary?.baseLoad != null && summary.baseLoad >= 0.25) {
     push({ id: 'standby', what: 'Cut always-on power', why: `About ${fmt(summary.baseLoad * 1000)} W runs around the clock — roughly ${fmt(summary.baseLoad * 24 * 30)} kWh a month.`, evidence: `Your quietest hour averages ${fmt(summary.baseLoad, 2)} kWh across ${summary.days} days of hourly data.`, impact: `Every 50 W switched off saves about 36 kWh a month${money(36)}.`, confidence: 'medium', confidenceWhy: 'Measured from your hourly data; which devices cause it isn’t visible to the app.' });
   }
@@ -662,7 +671,7 @@ export function opportunities({ state, rec, model, summary, report = null }) {
 export function noChangeSummary(report, ops) {
   if (!report || report.level === 'none' || ops.some((o) => o.confidence === 'high' || o.confidence === 'medium')) return null;
   const why = [];
-  if (report.night) why.push(`always-on use is a modest ${fmt(report.night.base)} W`);
+  if (report.night) why.push(`always-on use is a modest ${fmt(report.night.alwaysOn ?? report.night.base)} W`);
   if (!report.spikes.length && report.n >= 10) why.push('no days stand out');
   if (report.change == null && report.n >= 21) why.push('use has been steady recently');
   if (report.weather && !report.weather.heat && !report.weather.cool) why.push('weather barely moves your use, so a deeper setback wouldn’t save much');

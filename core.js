@@ -337,25 +337,84 @@ const xmlTag = (s, name) => {
   return m ? m[1] : null;
 };
 
-/** Green Button (ESPI) XML: IntervalReading blocks, Wh × 10^powerOfTenMultiplier, epoch-second starts. */
+/**
+ * Green Button (ESPI) XML, including Delmarva/Opower "Download my data" feeds.
+ * - Each IntervalBlock belongs to the most recent ReadingType. Only energy series (uom 72, Wh) are imported;
+ *   demand series (e.g. uom 38) and exact duplicate series are ignored.
+ * - Scale: the declared powerOfTenMultiplier is used when it gives plausible household values (and, when costs are
+ *   present, a plausible price per kWh); otherwise plain watt-hours are assumed and noted.
+ * - Time: when LocalTimeParameters say tzOffset 0, Opower writes local wall-clock time as if it were UTC.
+ */
 export function importGreenButton(xml) {
   if (typeof xml !== 'string' || !/IntervalReading/.test(xml)) throw new Error('Not a Green Button file: no IntervalReading elements found.');
-  const uom = xmlTag(xml, 'uom');
-  if (uom != null && uom !== '72') throw new Error(`Unsupported unit of measure (uom ${uom}); expected watt-hours (72).`);
-  // ponytail: uses the first ReadingType in the file; files mixing several meters/units would need per-block types.
-  const mult = Number(xmlTag(xml, 'powerOfTenMultiplier') ?? 0) || 0;
-  const records = [];
+  const notes = [];
+  const tz = /<(?:[\w-]+:)?tzOffset>\s*(-?\d+)\s*</.exec(xml);
+  const wallClock = tz && +tz[1] === 0;
+  const series = [];
+  let rt = { uom: null, mult: 0, flow: null };
   let skipped = 0;
-  for (const m of xml.matchAll(/<(?:[\w-]+:)?IntervalReading\b[\s\S]*?<\/(?:[\w-]+:)?IntervalReading>/g)) {
-    const b = m[0];
-    const start = Number(xmlTag(b, 'start')), dur = Number(xmlTag(b, 'duration')), val = Number(xmlTag(b, 'value'));
-    if (!Number.isFinite(start) || !Number.isFinite(val) || val < 0) { skipped++; continue; }
-    const { date, hour } = localParts(start * 1000);
-    const cost = xmlTag(b, 'cost');
-    records.push({ date, hour: dur > 3600 ? null : hour, kwh: (val * 10 ** mult) / 1000, cost: cost != null && Number.isFinite(+cost) ? +cost / 100000 : null, slot: `@${start}` });
+  for (const part of xml.split(/<(?:[\w-]+:)?entry\b[^>]*>/)) {
+    if (/<(?:[\w-]+:)?ReadingType\b/.test(part) || xmlTag(part, 'uom') != null) rt = { uom: xmlTag(part, 'uom'), mult: Number(xmlTag(part, 'powerOfTenMultiplier') ?? 0) || 0, flow: xmlTag(part, 'flowDirection') };
+    if (!/IntervalReading/.test(part)) continue;
+    const rows = [];
+    for (const m of part.matchAll(/<(?:[\w-]+:)?IntervalReading\b[\s\S]*?<\/(?:[\w-]+:)?IntervalReading>/g)) {
+      const b = m[0], start = Number(xmlTag(b, 'start')), dur = Number(xmlTag(b, 'duration')), val = Number(xmlTag(b, 'value')), cost = xmlTag(b, 'cost');
+      if (!Number.isFinite(start) || !Number.isFinite(val) || val < 0) { skipped++; continue; }
+      rows.push({ start, dur, val, cost: cost != null && Number.isFinite(+cost) ? +cost / 100000 : null });
+    }
+    const last = series[series.length - 1];
+    if (last && last.rt === rt) last.rows.push(...rows); else series.push({ rt, rows });
+  }
+  const energy = series.filter((x) => (x.rt.uom == null || x.rt.uom === '72') && x.rt.flow !== '19'); // 19 = energy sent back to the grid
+  if (!energy.length) throw new Error(`No energy (watt-hour) readings found; this file has only uom ${[...new Set(series.map((x) => x.rt.uom))].join(', ')}.`);
+  if (energy.length < series.length) notes.push('a demand series in the file was ignored (energy readings used)');
+  const sig = (x) => x.rows.map((r) => `${r.start}:${r.val}`).join(',');
+  const kept = energy.filter((x, i) => energy.findIndex((y) => sig(y) === sig(x)) === i);
+  if (kept.length < energy.length) notes.push('a duplicate copy of the readings was ignored');
+  const records = [];
+  for (const { rt: t, rows } of kept) {
+    const hourly = rows.filter((r) => r.dur <= 3600 && r.val > 0).map((r) => r.val).sort((x, y) => x - y);
+    const typical = hourly.length ? hourly[hourly.length >> 1] : null;
+    const priced = rows.filter((r) => r.cost > 0 && r.val > 0);
+    const price = (scale) => (priced.length ? priced.reduce((s, r) => s + r.cost, 0) / priced.reduce((s, r) => s + r.val * scale, 0) : null);
+    const ok = (scale) => (typical == null || (typical * scale >= 0.005 && typical * scale <= 25)) && (price(scale) == null || (price(scale) >= 0.03 && price(scale) <= 1));
+    const declared = 10 ** t.mult / 1000;
+    const scale = [declared, 1 / 1000, 10 ** -t.mult / 1000].find(ok) ?? declared;
+    if (scale !== declared) notes.push(`values read as watt-hours (the file’s ×10^${t.mult} scale tag doesn’t match its usage and costs)`);
+    for (const r of rows) {
+      const ms = r.start * 1000;
+      const { date, hour } = wallClock ? { date: new Date(ms).toISOString().slice(0, 10), hour: new Date(ms).getUTCHours() } : localParts(ms);
+      records.push({ date, hour: r.dur > 3600 ? null : hour, kwh: r.val * scale, cost: r.cost, slot: `@${r.start}` });
+    }
   }
   if (!records.length) throw new Error('The Green Button file had no readable interval readings.');
-  return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: uom == null };
+  return { records, skipped, interval: records.some((x) => x.hour != null) ? 'hourly' : 'daily', assumedWh: kept.some((x) => x.rt.uom == null), notes };
+}
+
+/**
+ * The .xml/.csv files inside a .zip (Delmarva's download is zipped). Uses the browser's DecompressionStream.
+ * Entries over 50 MB uncompressed, folders and macOS resource files are skipped.
+ */
+export async function unzipUsage(buf) {
+  const dv = new DataView(buf);
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('This zip file could not be read.');
+  const count = dv.getUint16(eocd + 10, true), out = [];
+  let p = dv.getUint32(eocd + 16, true);
+  for (let k = 0; k < count && dv.getUint32(p, true) === 0x02014b50; k++) {
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), usize = dv.getUint32(p + 24, true);
+    const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true), off = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(new Uint8Array(buf, p + 46, nlen));
+    p += 46 + nlen + xlen + clen;
+    if (!/\.(xml|csv)$/i.test(name) || /(^|\/)(__MACOSX|\.)/.test(name) || usize > 50e6) continue;
+    const data = new Uint8Array(buf, off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true), csize);
+    if (method !== 0 && method !== 8) throw new Error('This zip uses an unsupported compression method.');
+    const bytes = method === 0 ? data : new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+    out.push({ name: name.split('/').pop(), text: new TextDecoder().decode(bytes) });
+  }
+  if (!out.length) throw new Error('The zip file has no .xml or .csv usage file inside.');
+  return out;
 }
 
 export function importUsageFile(name, text) {
