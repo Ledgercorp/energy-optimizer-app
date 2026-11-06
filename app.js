@@ -15,7 +15,9 @@ const STANDALONE = navigator.standalone === true || window.matchMedia?.('(displa
 const HOUR = Wx.HOUR;
 const API = 'https://aeo-public.colbyweiss15.workers.dev/data/weather/'; // read-only Cloudflare weather service
 const SEASONS = [['heat_available', 'Heat'], ['cool_available', 'Cooling'], ['fan_only', 'Fan only'], ['unknown', 'Not sure']];
-const DAYWORD = { weekday: 'Weekdays', weekend: 'Weekends' };
+const DAYWORD = { weekday: 'Weekdays', weekend: 'Weekends', ...Object.fromEntries(C.DOW.map((d) => [`days.${d}`, C.DAY_NAME[d]])) };
+const DAYSUB = { weekday: 'Monday to Friday', weekend: 'Saturday and Sunday' };
+const dayId = (day) => day.replace('.', '-');
 const AWAY_DEFAULT = { weekday: { leave: '08:00', back: '17:30' }, weekend: { leave: '10:00', back: '16:00' } };
 
 const $ = (s) => document.querySelector(s);
@@ -175,7 +177,13 @@ const disconnected = `<p class="disconnected">${ic.unplug}Thermostat not connect
 
 function scheduleTables(rec) {
   const table = (day, t) => `<div><h3>${t}</h3><table><tbody>${day.map((pd) => `<tr><td>${pd.name}${pd.away ? ' <span class="tag">away</span>' : ''}</td><td>${C.fmtMin(pd.start)}</td><td class="t">${pd.temp}°</td></tr>`).join('')}</tbody></table></div>`;
-  return rec.plans.map((pl) => `<section class="card"><h2>${modeName(pl.mode)}</h2><div class="sched-grid">${table(pl.weekday, 'Mon–Fri')}${table(pl.weekend, 'Sat–Sun')}</div></section>`).join('');
+  const groups = (pl) => {
+    if (!pl.daysMode) return [[pl.weekday, 'Mon–Fri'], [pl.weekend, 'Sat–Sun']];
+    const sig = (d) => JSON.stringify(pl.days[d].map((x) => [x.start, x.temp])), out = [];
+    for (const d of ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']) { const g = out.find((x) => x.sig === sig(d)); if (g) g.days.push(d); else out.push({ sig: sig(d), days: [d] }); }
+    return out.map((g) => [pl.days[g.days[0]], g.days.join(', ')]);
+  };
+  return rec.plans.map((pl) => `<section class="card"><h2>${modeName(pl.mode)}</h2><div class="sched-grid">${groups(pl).map(([d, t]) => table(d, t)).join('')}</div></section>`).join('');
 }
 
 // ---------- Today ----------
@@ -607,13 +615,20 @@ const numItem = (k, label, attrs) => `<label class="item"><span>${label}</span><
 const group = (head, sub, body) => `<section class="group">${head ? `<div class="group-head"><h2>${head}</h2>${sub ? `<p>${sub}</p>` : ''}</div>` : ''}${body}</section>`;
 
 function routineGroup(day) {
-  const r = S.profile.routine[day], home = !r.leave && !r.back;
+  const r = getPath(S.profile.routine, day), home = !r.leave && !r.back;
   const k = (f) => `profile.routine.${day}.${f}`;
-  const w = day === 'weekday' ? 'Weekday' : 'Weekend';
-  return group(DAYWORD[day], day === 'weekday' ? 'Monday to Friday' : 'Saturday and Sunday', `${timeItem(k('wake'), 'Wake up')}
+  const w = DAYWORD[day].replace(/s$/, '');
+  return group(DAYWORD[day], DAYSUB[day] || '', `${timeItem(k('wake'), 'Wake up')}
     <label class="item"><span>Someone is home all day</span><span class="switch"><input type="checkbox" data-home="${day}" ${home ? 'checked' : ''}><i></i></span></label>
-    ${home ? '' : `${timeItem(k('leave'), 'Leave home')}${timeItem(k('back'), 'Back home')}`}${timeItem(k('sleep'), 'Bedtime')}
-    <p class="field-error" id="err-${day}" role="alert" hidden></p>`).replace(/data-label="(Wake up|Leave home|Back home|Bedtime)"/g, (_, l) => `data-label="${w} ${l.toLowerCase()}"`);
+    ${home ? '' : `${timeItem(k('leave'), 'Everyone leaves')}${timeItem(k('back'), 'Someone is back')}`}${timeItem(k('sleep'), 'Bedtime')}
+    <p class="field-error" id="err-${dayId(day)}" role="alert" hidden></p>`).replace(/data-label="(Wake up|Everyone leaves|Someone is back|Bedtime)"/g, (_, l) => `data-label="${w} ${l.toLowerCase()}"`);
+}
+/** Weekdays/Weekends, or each day separately (the IT900's Individual Days mode). "Home" means anyone is home. */
+function routineSection() {
+  const daysMode = S.profile.routine.mode === 'days';
+  const seg = `<div class="seg" role="group" aria-label="Schedule type"><button data-act="routine-mode" data-v="groups" aria-pressed="${!daysMode}">Weekdays + weekends</button><button data-act="routine-mode" data-v="days" aria-pressed="${daysMode}">Each day separately</button></div>`;
+  return `${group('Routine', 'When is anyone home? The schedule heats or cools the apartment while someone is there and eases off only when it’s empty.', `<div class="item col">${seg}</div>`)}
+    ${daysMode ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => routineGroup(`days.${d}`)).join('') : `${routineGroup('weekday')}${routineGroup('weekend')}`}`;
 }
 
 function savedBanner() {
@@ -647,7 +662,7 @@ function viewSettings() {
   const left = `
     ${group('Apartment', 'What is the building providing right now?', `<div class="item col">${seasonSeg('What the building provides')}</div>`)}
     ${group('Comfort at home', 'Away and sleep temperatures move with these automatically.', `${modes.includes('heat') || p.buildingMode === 'unknown' ? stepper('profile.comfort.heat.home', 'Heat to') : ''}${modes.includes('cool') || p.buildingMode === 'unknown' ? stepper('profile.comfort.cool.home', 'Cool to') : ''}${p.buildingMode === 'fan_only' ? '<div class="item"><span class="muted">No heating or cooling to set right now</span></div>' : ''}`)}
-    ${routineGroup('weekday')}${routineGroup('weekend')}`;
+    ${routineSection()}`;
   const right = `
     ${group('Electricity data', 'Used only on this device to measure what’s working.', `<div class="item"><span>Latest data</span><span class="value">${days.length ? `${esc(dayLabel(days[days.length - 1].date))} · ${days.length} days` : 'None yet'}</span></div><div class="item col">${importButton()}${busy === 'import' ? '<p class="fine">Reading…</p>' : ''}<details class="inline"><summary>How to get the file from Delmarva</summary>${HOW_TO_DOWNLOAD}</details></div>${days.length ? '<button class="item danger" data-act="clear-usage">Delete electricity data</button>' : ''}`)}
     ${zonesGroup()}
@@ -711,7 +726,7 @@ function routineError(r) {
 function finishSetup() {
   const d = draft, p = S.profile, c = p.comfort;
   p.buildingMode = d.buildingMode;
-  p.routine = draftRoutine(d);
+  p.routine = { ...p.routine, ...draftRoutine(d), mode: 'groups' }; // quick setup uses weekdays + weekends; per-day times stay saved
   const shift = (m, home) => { const dlt = home - c[m].home; c[m].home += dlt; c[m].away += dlt; c[m].sleep += dlt; };
   shift('heat', d.heat);
   shift('cool', d.cool);
@@ -732,7 +747,7 @@ function viewProgram() {
   const words = { heat: 'Heat to', cool: 'Cool to' };
   let body;
   if (s.kind === 'intro') {
-    body = `<h1>Program your thermostat</h1><p class="lead">Stand at the thermostat. You’ll enter a start time and a temperature for four periods, once for weekdays and once for weekends${rec.plans.length > 1 ? ', for heating and then cooling' : ''}. About 5 minutes.</p>
+    body = `<h1>Program your thermostat</h1><p class="lead">Stand at the thermostat. You’ll enter a start time and a temperature for four periods, ${rec.plans.some((p) => p.daysMode) ? 'for each day of the week (days identical to the one before are a single step)' : 'once for weekdays and once for weekends'}${rec.plans.length > 1 ? ', for heating and then cooling' : ''}. About 5 minutes.</p>
       <section class="card"><h2>Buttons you’ll use</h2><ul class="keylist"><li><kbd class="key">▲</kbd><kbd class="key">▼</kbd><span>change the highlighted value</span></li><li><kbd class="key">►</kbd><span>moves to the next value</span></li><li><kbd class="key">HOME</kbd><span>start over if you get lost. Nothing is saved until you press <kbd class="key">DONE</kbd>.</span></li></ul></section>
       <p class="fine">For the Emerson IntelliTEMP IT900 (Delmarva Energy Wise Rewards). Different thermostat? <a href="#schedule">Use the schedule table</a> with its own instructions.</p>`;
   } else if (s.kind === 'period') {
@@ -941,6 +956,16 @@ const ACTIONS = {
     toast('Added to “Things you’re trying”. Mark it started when you begin.');
     render();
   },
+  'routine-mode'(el) {
+    const v = el.dataset.v, rt = S.profile.routine;
+    if (v === rt.mode || !['groups', 'days'].includes(v)) return;
+    // Switching to individual days starts from the current weekday/weekend times so nothing changes until you edit a day.
+    if (v === 'days') rt.days = Object.fromEntries(C.DOW.map((d) => [d, { ...(d === 'Sat' || d === 'Sun' ? rt.weekend : rt.weekday) }]));
+    rt.mode = v;
+    save();
+    noteSaved(v === 'days' ? 'routine: each day separately' : 'routine: weekdays + weekends');
+    render();
+  },
   'zone-add'() {
     const n = (S.zones || []).length;
     if (n >= 4) return;
@@ -1054,13 +1079,13 @@ async function importUsage(files) {
 
 /** Routine edits are checked before saving: an impossible routine is explained and the last valid one stays in use. */
 function routineChange(el, k, v) {
-  const day = k.split('.')[2];
-  const trial = { ...S.profile.routine[day], [k.split('.')[3]]: v };
+  const parts = k.split('.'), day = parts.slice(2, -1).join('.'), field = parts[parts.length - 1];
+  const trial = { ...getPath(S.profile.routine, day), [field]: v };
   const err = routineError(trial);
-  const box = $(`#err-${day}`);
+  const box = $(`#err-${dayId(day)}`);
   if (err) {
     el.setAttribute('aria-invalid', 'true');
-    if (box) { box.textContent = `${err} Your last valid ${day} schedule is still in use.`; box.hidden = false; }
+    if (box) { box.textContent = `${err} Your last valid ${DAYWORD[day].toLowerCase()} schedule is still in use.`; box.hidden = false; }
     return;
   }
   el.removeAttribute('aria-invalid');
@@ -1072,13 +1097,13 @@ function routineChange(el, k, v) {
 }
 
 function homeAllDay(el) {
-  const day = el.dataset.home, r = S.profile.routine[day];
+  const day = el.dataset.home, r = getPath(S.profile.routine, day), awayDefault = AWAY_DEFAULT[day] || AWAY_DEFAULT.weekday;
   UI.away = UI.away || {};
   let next;
-  if (el.checked) { UI.away[day] = { leave: r.leave, back: r.back }; next = { ...r, leave: '', back: '' }; } else { const p = UI.away[day] || AWAY_DEFAULT[day]; next = { ...r, leave: p.leave || AWAY_DEFAULT[day].leave, back: p.back || AWAY_DEFAULT[day].back }; }
+  if (el.checked) { UI.away[day] = { leave: r.leave, back: r.back }; next = { ...r, leave: '', back: '' }; } else { const p = UI.away[day] || awayDefault; next = { ...r, leave: p.leave || awayDefault.leave, back: p.back || awayDefault.back }; }
   const err = routineError(next);
-  if (err) { el.checked = !el.checked; const box = $(`#err-${day}`); if (box) { box.textContent = `${err} Adjust the times first.`; box.hidden = false; } return; }
-  S.profile.routine[day] = next;
+  if (err) { el.checked = !el.checked; const box = $(`#err-${dayId(day)}`); if (box) { box.textContent = `${err} Adjust the times first.`; box.hidden = false; } return; }
+  setPath(S.profile.routine, day, next);
   saveUI(); save();
   noteSaved(el.checked ? `${DAYWORD[day]}: someone is home all day` : `${DAYWORD[day]}: away ${timeText(next.leave)}–${timeText(next.back)}`);
   render();

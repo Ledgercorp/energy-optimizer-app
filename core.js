@@ -7,6 +7,14 @@ export const PERIODS = ['Morning', 'Day', 'Evening', 'Night'];
 export const BUILDING_MODES = { heat_available: ['heat'], cool_available: ['cool'], fan_only: [], unknown: ['heat', 'cool'] };
 export const BUILDING_LABEL = { heat_available: 'heating season', cool_available: 'cooling season', fan_only: 'fan only', unknown: 'unknown' };
 
+export const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const DAY_NAME = { Sun: 'Sunday', Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+/** The routine that applies on a weekday ('Mon'…). Someone being home counts as "home", whoever it is. */
+export function routineFor(routine, d) {
+  if (routine?.mode === 'days' && routine.days?.[d]) return routine.days[d];
+  return d === 'Sat' || d === 'Sun' ? routine.weekend : routine.weekday;
+}
+
 export function defaultState() {
   return {
     version: 1,
@@ -19,6 +27,9 @@ export function defaultState() {
       routine: {
         weekday: { wake: '06:30', leave: '08:00', back: '17:30', sleep: '22:30' },
         weekend: { wake: '08:00', leave: '', back: '', sleep: '23:00' },
+        // 'groups' = Weekdays/Weekends; 'days' = each day separately (the IT900's Individual Days programming).
+        mode: 'groups',
+        days: Object.fromEntries(DOW.map((d) => [d, d === 'Sat' || d === 'Sun' ? { wake: '08:00', leave: '', back: '', sleep: '23:00' } : { wake: '06:30', leave: '08:00', back: '17:30', sleep: '22:30' }])),
       },
       recoveryMin: 30,
       tariff: { centsPerKwh: null, confirmed: false },
@@ -149,7 +160,7 @@ export function currentTargets(plans, now) {
   const m = hour * 60 + minute;
   const weekend = weekday === 'Sat' || weekday === 'Sun';
   return plans.map((pl) => {
-    const day = weekend ? pl.weekend : pl.weekday;
+    const day = pl.days?.[weekday] || (weekend ? pl.weekend : pl.weekday);
     let i = -1;
     day.forEach((p, k) => { if (p.start <= m) i = k; });
     // ponytail: before Morning we report today's Night entry; the previous day type's Night may differ by a degree.
@@ -243,7 +254,10 @@ export function recommend(state, hours = [], now = Date.now()) {
   for (const mode of modes) {
     const sp = guardSetpoints(mode, p);
     try {
-      plans.push({ mode, setpoints: sp, notes: sp.notes, weekday: buildDay(p.routine.weekday, sp, p.recoveryMin), weekend: buildDay(p.routine.weekend, sp, p.recoveryMin) });
+      if (p.routine.mode === 'days') {
+        const days = Object.fromEntries(DOW.map((d) => { try { return [d, buildDay(routineFor(p.routine, d), sp, p.recoveryMin)]; } catch (e) { throw new Error(`${DAY_NAME[d]}: ${e.message}`); } }));
+        plans.push({ mode, setpoints: sp, notes: sp.notes, daysMode: true, days, weekday: days.Mon, weekend: days.Sat });
+      } else plans.push({ mode, setpoints: sp, notes: sp.notes, weekday: buildDay(p.routine.weekday, sp, p.recoveryMin), weekend: buildDay(p.routine.weekend, sp, p.recoveryMin) });
     } catch (e) {
       errors.push(e.message);
     }
