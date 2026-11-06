@@ -1918,7 +1918,7 @@ const BILL_PARTS = ['supply', 'delivery', 'fixed', 'taxes', 'credits', 'adjustme
 export function cleanBills(list) {
   return (Array.isArray(list) ? list : []).filter((b) => b && isIso(b.end) && isMoney(+b.amount) && +b.amount >= 0).slice(-60).map((b) => {
     const out = { id: String(b.id || `${b.end}|${b.amount}`).slice(0, 60), start: isIso(b.start) && b.start < b.end ? b.start : '', end: b.end, kwh: optNum(b.kwh) > 0 ? +b.kwh : null, amount: +b.amount,
-      days: Number.isInteger(+b.days) && +b.days > 0 && +b.days < 100 ? +b.days : null, estimatedRead: b.estimatedRead === true, source: b.source === 'pdf' ? 'pdf' : 'manual', at: isIso(b.at) ? b.at : '', statementDate: isIso(b.statementDate) ? b.statementDate : '' };
+      days: Number.isInteger(+b.days) && +b.days > 0 && +b.days < 100 ? +b.days : null, estimatedRead: b.estimatedRead === true, source: ['pdf', 'greenbutton'].includes(b.source) ? b.source : 'manual', at: isIso(b.at) ? b.at : '', statementDate: isIso(b.statementDate) ? b.statementDate : '' };
     for (const k of BILL_PARTS) out[k] = isMoney(optNum(b[k])) ? optNum(b[k]) : null;
     return out;
   }).sort((a, b) => (a.end < b.end ? -1 : 1));
@@ -1935,6 +1935,24 @@ export function statementConflicts(saved, rec, { editingId = null } = {}) {
   const revision = duplicate ? null : list.find((b) => b.end === r.end || (r.start && b.start === r.start)) || null;
   const overlaps = list.filter((b) => b !== duplicate && b !== revision && b.start && r.start && b.start < r.end && r.start < b.end);
   return { duplicate, revision, overlaps };
+}
+/**
+ * Plan for adding billing periods from a Delmarva billing-data export. Identical periods are skipped; a period whose figures differ from a saved
+ * one (a corrected bill) or that overlaps different dates is held for review. Nothing saved is changed by this function.
+ */
+export function planBillingImport(saved, periods, { today = '' } = {}) {
+  const have = cleanBills(saved), plan = { add: [], same: 0, review: [] };
+  for (const p of periods) {
+    const rec = cleanBills([{ id: `gb|${p.start}|${p.end}`, ...p, source: 'greenbutton', at: today }])[0];
+    if (!rec) continue;
+    const sameDates = have.filter((b) => b.start === rec.start && b.end === rec.end);
+    if (sameDates.some((b) => b.amount === rec.amount && b.kwh === rec.kwh)) { plan.same++; continue; }
+    if (sameDates.length) { plan.review.push({ kind: 'changed', incoming: rec, existing: sameDates[0] }); continue; }
+    const ov = have.filter((b) => b.start && b.start <= rec.end && rec.start <= b.end);
+    if (ov.length) { plan.review.push({ kind: 'overlap', incoming: rec, existing: ov[0] }); continue; }
+    plan.add.push(rec);
+  }
+  return plan;
 }
 export function cleanProjection(p) {
   if (!p || !isMoney(+p.amount) || +p.amount < 0) return null;
@@ -1964,6 +1982,10 @@ export function billDrivers(prev, cur, { tempPrev = null, tempCur = null } = {})
     known.push(days, use);
     const vp = variablePrice(prev), vc = variablePrice(cur);
     if (vp != null && vc != null) { const pr = cur.kwh * (vc - vp); out.push({ id: 'price', label: `energy price ${fmt(vc * 100, 2)}¢ vs ${fmt(vp * 100, 2)}¢ per kWh`, amount: r2(pr), status: 'confirmed' }); known.push(pr); }
+    else if (prev.fixed == null && cur.fixed == null && !prev.credits && !cur.credits && !prev.adjustments && !cur.adjustments) {
+      const p1 = cur.amount / cur.kwh, pr = cur.kwh * (p1 - p0);
+      out.push({ id: 'avgprice', label: `average price ${fmt(p1 * 100, 2)}¢ vs ${fmt(p0 * 100, 2)}¢ per kWh (includes any fixed charges and taxes, which aren’t itemised)`, amount: r2(pr), status: 'confirmed' }); known.push(pr);
+    }
   }
   for (const [k, label, sign] of [['fixed', 'fixed charges', 1], ['credits', 'credits', -1], ['adjustments', 'adjustments', 1]]) {
     if (prev[k] != null && cur[k] != null && Math.abs(cur[k] - prev[k]) >= 0.005) { const v = sign * (cur[k] - prev[k]); out.push({ id: k, label: `${label} ${money(cur[k])} vs ${money(prev[k])}`, amount: r2(v), status: 'confirmed' }); known.push(v); }
@@ -2017,21 +2039,24 @@ export function billView({ state, temps = {}, now = Date.now() }) {
     const bd = billedDays(b);
     const win = (a, z) => { const ds = []; for (let d = a; d <= z; d = isoAdd(d, 1)) if (byDate.has(d)) ds.push(byDate.get(d)); return ds; };
     // Meter reads are taken on the start and end dates; the energy in between is either [start, end) or (start, end]. Both are shown.
-    const A1 = b.start ? win(b.start, isoAdd(b.end, -1)) : [], A2 = b.start ? win(isoAdd(b.start, 1), b.end) : [];
+    const inclusive = b.start && b.days && b.days === isoGap(b.start, b.end) + 1; // Delmarva's billing export lists first and last service day
+    const A1 = b.start ? (inclusive ? win(b.start, b.end) : win(b.start, isoAdd(b.end, -1))) : [], A2 = b.start ? (inclusive ? A1 : win(isoAdd(b.start, 1), b.end)) : [];
     const covered = !!b.start && bd != null && A1.length === bd && A2.length === bd;
     const k1 = covered ? sum(A1.map((d) => d.kwh)) : null, k2 = covered ? sum(A2.map((d) => d.kwh)) : null;
     const kwhGap = covered && b.kwh ? Math.min(Math.abs(b.kwh - k1), Math.abs(b.kwh - k2)) / b.kwh : null;
+    const kwhWithinRounding = covered && b.kwh != null && Number.isInteger(b.kwh) && Math.min(Math.abs(b.kwh - k1), Math.abs(b.kwh - k2)) < 1; // billed kWh are whole numbers
     const intervalCost = covered ? (costOf(A1) + costOf(A2)) / 2 : null;
     const notes = [];
     if (!b.start) notes.push('No start date entered, so it can’t be matched to readings.');
     else if (!covered) notes.push(`Your readings cover ${Math.min(A1.length, A2.length)} of its ${bd} days.`);
     if (b.estimatedRead) notes.push('Delmarva estimated the meter reading for this bill; a later bill corrects it, so its kWh may not match your readings.');
     if (kwhGap != null && kwhGap > 0.03) notes.push(`Billed kWh differs from your readings by ${fmt(kwhGap * 100, 1)}% — more than rounding.`);
+    if (b.source === 'greenbutton' && b === bills[0] && b.days && b.days < 28 && days.length && b.start <= days[0].date) notes.push('Shorter than a usual billing period and it starts on the first day of the export — it may be cut off at the start.');
     if (b.adjustments) notes.push('Includes an adjustment, which is left out of usage comparisons.');
     const ov = bills.filter((o) => o !== b && o.start && b.start && o.start < b.end && b.start < o.end);
     if (ov.length) notes.push(`Overlaps the statement ending ${md(ov[0].end)} — one of them may be a corrected bill; comparisons treat them separately.`);
     return { ...b, billed_days: bd, covered, readings_kwh: k1 != null ? r1((k1 + k2) / 2) : null, readings_kwh_range: k1 != null ? [r1(Math.min(k1, k2)), r1(Math.max(k1, k2))] : null,
-      kwh_matches: kwhGap != null ? kwhGap <= 0.03 : null, interval_cost: intervalCost != null ? r2(intervalCost) : null, beyond_readings: intervalCost != null ? r2(b.amount - intervalCost) : null,
+      kwh_matches: kwhGap != null ? kwhGap <= 0.03 : null, kwh_within_rounding: kwhWithinRounding, interval_cost: intervalCost != null ? r2(intervalCost) : null, beyond_readings: intervalCost != null ? r2(b.amount - intervalCost) : null,
       cost_per_day: bd ? r2(b.amount / bd) : null, kwh_per_day: bd && b.kwh ? r1(b.kwh / bd) : null, cents_per_kwh: b.kwh ? r2((b.amount / b.kwh) * 100) : null, variable_cents: variablePrice(b) != null ? r2(variablePrice(b) * 100) : null,
       temp_f: b.start ? tempOf(b.start, b.end) : null, notes };
   });
@@ -2061,23 +2086,39 @@ export function billView({ state, temps = {}, now = Date.now() }) {
       const at = (k) => (fixed + k * len * price) * (1 + (last.taxes != null ? taxesShare : 0)) - (last.credits ?? 0) * 0;
       estimate = { low: r2(at(Math.max(0, kd - 2 * sdd))), high: r2(at(kd + 2 * sdd)), kwh_per_day: r1(kd), days_so_far: since.length, period_days: len, from: isoAdd(last.end, 0),
         method: `Your ${since.length} days of readings since ${md(last.end)} (${fmt(kd, 1)} kWh a day) × ${len} days (the length of your last bill) × your last bill’s energy price (${fmt(last.variable_cents, 2)}¢), plus its fixed charges${last.taxes != null ? ' and tax rate' : ''}. Assumes prices and the period length don’t change and no credits apply.` };
-    } else if (since.length >= 7) missing.push('Supply and delivery charges (or the fixed customer charge) on your latest statement, so the app can separate price from usage and estimate the current bill.');
+    } else if (since.length >= 7) {
+      const recent = statements.filter((x) => x.kwh && x.billed_days).slice(-4), cents = recent.map((x) => x.amount / x.kwh), lens = recent.map((x) => x.billed_days);
+      const kd = avg(since.map((d) => d.kwh)), sdd = sd(since.map((d) => d.kwh)) / Math.sqrt(since.length);
+      const L = Math.round(median(lens)), cLo = Math.min(...cents), cHi = Math.max(...cents), cMid = median(cents);
+      const lo = Math.max(0, kd - 2 * sdd) * (L - 1) * cLo, hi = (kd + 2 * sdd) * (L + 1) * cHi, mid = kd * L * cMid;
+      estimate = { low: r2(lo), high: r2(hi), mid: r2(mid), kwh_per_day: r1(kd), days_so_far: since.length, period_days: [L - 1, L + 1], from: isoAdd(last.end, 1), rough: true,
+        method: `Rough: ${fmt(kd, 1)} kWh a day (your ${since.length} days of readings since ${md(last.end)}) × about ${L} days (your usual bill length, ±1) × ${fmt(cMid * 100, 1)}¢ per kWh (your recent bills’ average, ${fmt(cLo * 100, 1)}–${fmt(cHi * 100, 1)}¢, which already includes fixed charges and taxes) ≈ ${money(mid)}. The range allows for how your use varies day to day. The period’s real end date, the rest of its readings and Delmarva’s current prices aren’t known.` };
+      missing.push('An itemised statement (supply, delivery, customer charge, taxes) would separate price from usage; the billing export only gives totals.');
+    }
   }
 
   // Lines, source by source.
   if (compare) {
     const { prev: a, cur: b } = compare;
-    lines.push({ kind: 'statement', text: `Statements you entered: ${money(a.amount)} (${a.billed_days ?? '?'} days to ${md(a.end)}) then ${money(b.amount)} (${b.billed_days ?? '?'} days to ${md(b.end)}) — ${compare.total >= 0 ? 'up' : 'down'} ${money(Math.abs(compare.total))}.` });
+    const srcName = (x) => (x.source === 'greenbutton' ? 'Delmarva’s billing data' : x.source === 'pdf' ? 'your statement PDFs' : 'the statements you entered');
+    lines.push({ kind: 'statement', text: `Last two bills (${a.source === b.source ? srcName(b) : `${srcName(a)} and ${srcName(b)}`}): ${money(a.amount)} (${a.billed_days ?? '?'} days to ${md(a.end)}) then ${money(b.amount)} (${b.billed_days ?? '?'} days to ${md(b.end)}) — ${compare.total >= 0 ? 'up' : 'down'} ${money(Math.abs(compare.total))}.` });
     if (compare.drivers.length) lines.push({ kind: 'statement', text: `Why: ${compare.drivers.filter((x) => x.amount != null).map((x) => `${x.label}: ${x.amount >= 0 ? '+' : '−'}${money(Math.abs(x.amount))}${x.status === 'unexplained' ? ' (not explained by entered figures)' : ''}`).join('; ')}.${compare.drivers.some((x) => x.status === 'possible') ? ` Possible, not measured: ${compare.drivers.filter((x) => x.status === 'possible').map((x) => x.label).join('; ')}.` : ''}` });
   }
   const covered = statements.filter((s) => s.covered);
-  if (covered.length) lines.push({ kind: 'reconciled', text: `Matched to your readings for the same days: ${covered.map((s) => `to ${md(s.end)}: billed ${s.kwh ? fmt(s.kwh) : '?'} kWh vs measured ${fmt(s.readings_kwh)} kWh${s.kwh_matches === false ? ' (more than rounding apart)' : ''}; statement minus the file’s per-hour costs ${money(s.beyond_readings)}`).join(' · ')}. That difference can be fixed charges, taxes, fees, a different price or credits; the file can’t split it.` });
-  if (estimate) lines.push({ kind: 'estimate', text: `App estimate for the bill after ${md(last.end)}: ${money(estimate.low)}–${money(estimate.high)}. ${estimate.method}` });
+  if (covered.length) {
+    lines.push({ kind: 'reconciled', text: `Matched to your readings for the same days: ${covered.map((s) => `to ${md(s.end)}: billed ${s.kwh ? fmt(s.kwh) : '?'} kWh vs measured ${fmt(s.readings_kwh, 2)} kWh${s.kwh_within_rounding ? ' (same, within whole-kWh rounding)' : s.kwh_matches === false ? ' (more than rounding apart)' : ''}; billed amount minus the file’s hourly costs ${money(s.beyond_readings)}`).join(' · ')}.` });
+    const gaps = covered.map((s) => s.beyond_readings).filter((x) => x != null);
+    lines.push({ kind: 'reconciled', text: gaps.length >= 2 && Math.max(...gaps) - Math.min(...gaps) >= 3 ? `That gap varied from ${money(Math.min(...gaps))} to ${money(Math.max(...gaps))} between bills, so it isn’t one fixed monthly fee. It may be taxes, fees, charges priced differently from the hourly costs, or credits — the export doesn’t itemise it, so the app doesn’t assume which.` : 'That gap may be fixed charges, taxes, fees, a different price or credits — the export doesn’t itemise it, so the app doesn’t assume which.' });
+  }
+  if (estimate) lines.push({ kind: 'estimate', text: `App estimate for the bill after ${md(last.end)}: ${estimate.mid != null ? `about ${money(estimate.mid)} (` : ''}${money(estimate.low)}–${money(estimate.high)}${estimate.mid != null ? ')' : ''}. ${estimate.method}` });
+  const story = billingStory(statements, days);
+  if (story) lines.unshift(...story.map((text) => ({ kind: 'statement', text })));
   if (proj) lines.push({ kind: 'projection', text: `Delmarva’s projection, entered by you: ${money(proj.amount)}${proj.asOf ? ` (as of ${md(proj.asOf)})` : ''}. It is Delmarva’s number, not the app’s.${estimate ? ` The app’s estimate is ${money(estimate.low)}–${money(estimate.high)}${proj.amount < estimate.low || proj.amount > estimate.high ? ' — they differ; Delmarva may expect different days, prices or usage' : ''}.` : ''}` });
   if (thirty) {
     const t = thirty, near = Math.abs(t.latest_vs_typical_pct) < 8;
     lines.push({ kind: 'measured', text: `Measured: any 30 days in your readings used ${fmt(t.low_kwh)}–${fmt(t.high_kwh)} kWh (typical ${fmt(t.typical_kwh)}). The latest 30 days (${md(t.latest.from)}–${md(t.latest.to)}): ${fmt(t.latest.kwh)} kWh — ${near ? 'about typical' : `${fmt(Math.abs(t.latest_vs_typical_pct))}% ${t.latest_vs_typical_pct > 0 ? 'above' : 'below'} typical`}.` });
-    lines.push({ kind: 'measured', text: `Your lightest 30 days were ${md(t.lowest.from)}–${md(t.lowest.to)}: ${fmt(t.lowest.kwh)} kWh${t.lowest.cost != null ? ` (about ${money(t.lowest.cost)} by the file’s per-hour costs)` : ''}. A bill whose dates fall mostly in a stretch like that would come in lower than usual; which bill that is depends on your billing dates${bills.length ? '' : ', which the file doesn’t contain'}.` });
+    const hit = statements.filter((x) => x.start).map((x) => ({ x, n: Math.max(0, isoGap(x.start > t.lowest.from ? x.start : t.lowest.from, x.end < t.lowest.to ? x.end : t.lowest.to) + 1) })).sort((a, b) => b.n - a.n)[0];
+    lines.push({ kind: 'measured', text: `Your lightest 30 days were ${md(t.lowest.from)}–${md(t.lowest.to)}: ${fmt(t.lowest.kwh)} kWh${t.lowest.cost != null ? ` (about ${money(t.lowest.cost)} by the file’s per-hour costs)` : ''}. ${hit && hit.n >= 15 ? `${hit.n} of those days fall in the ${md(hit.x.start)}–${md(hit.x.end)} billing period.` : `A bill whose dates fall mostly in a stretch like that would come in lower than usual; which bill that is depends on your billing dates${bills.length ? '' : ', which the file doesn’t contain'}.`}` });
   }
   if (stretches.length >= 2) {
     const [c, p] = stretches, dk = c.kwh - p.kwh;
@@ -2333,4 +2374,23 @@ export function evaluateExperiment({ state, temps = {}, exp, now = Date.now() })
   }
   if (lo > 0) return { ...out, status: 'increased', label: 'Use went up', detail: `${fmt(diff, 2)} kWh a day more in ${out.window} (95% range ${fmt(lo, 2)}–${fmt(hi, 2)}). The change didn’t help, or something else changed at the same time.` };
   return { ...out, status: 'inconclusive', label: 'No clear difference', detail: `The difference (${diff >= 0 ? '+' : ''}${fmt(diff, 2)} kWh a day, 95% range ${fmt(lo, 2)} to ${fmt(hi, 2)}) is within normal day-to-day variation. The meter could only show about ${fmt(mde, 2)} kWh a day or more.${expected != null ? ` Your described change is about ${fmt(expected, 2)} kWh a day.` : ''}` };
+}
+
+/** Why the latest billing period differs from the earlier ones — only from the reported figures and the readings for the same days. */
+function billingStory(statements, days) {
+  const full = statements.filter((x) => x.kwh && x.billed_days && x.amount != null);
+  if (full.length < 3) return null;
+  const cur = full[full.length - 1], earlier = full.slice(0, -1), kd = (x) => x.kwh / x.billed_days, cd = (x) => x.amount / x.billed_days, ck = (x) => x.amount / x.kwh;
+  const lowest = full.reduce((m, x) => (x.amount < m.amount ? x : m));
+  const out = [`Billing periods: ${full.map((x) => `${md(x.start)}–${md(x.end)} ${money(x.amount)} (${x.billed_days} days, ${fmt(x.kwh)} kWh)`).join('; ')}.`];
+  if (lowest === cur) {
+    const mk = median(earlier.map(kd)), mc = median(earlier.map(ck)), md0 = median(earlier.map((x) => x.billed_days));
+    out.push(`The ${md(cur.start)}–${md(cur.end)} bill (${money(cur.amount)}) was the lowest because less electricity was used: ${fmt(kd(cur), 1)} kWh a day vs ${fmt(mk, 1)} typical in the earlier periods. It also had ${cur.billed_days} days (typical ${fmt(md0)}), and an average of ${fmt(ck(cur) * 100, 1)}¢ per kWh vs ${fmt(mc * 100, 1)}¢.`);
+    const inPer = days.filter((d) => d.date >= cur.start && d.date <= cur.end);
+    if (inPer.length === cur.billed_days) {
+      const before = days.filter((d) => d.date < cur.start).slice(-60);
+      if (before.length >= 30) out.push(`Your readings agree: ${fmt(avg(inPer.map((d) => d.kwh)), 1)} kWh a day in that period vs ${fmt(avg(before.map((d) => d.kwh)), 1)} in the 60 days before — the bill was lower because use was lower, not because of a billing change.`);
+    }
+  }
+  return out;
 }
