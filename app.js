@@ -259,7 +259,7 @@ function viewToday() {
   const st = A.todayStatus(S, rec);
   const inv = st.kind === 'setup' ? null : invNow();
   const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
-  const main = [hh, hero(st, rec), st.kind === 'setup' ? '' : normalityCard(), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), st.kind === 'setup' ? '' : awayCards(), zonesCard(), programCard(st, rec)];
+  const main = [st.kind === 'setup' ? normalityCard() : '', hh, hero(st, rec), st.kind === 'setup' ? '' : normalityCard(), st.kind === 'setup' ? '' : inv?.hypotheses?.length ? investigationCard(inv) : learnedToday(), st.kind === 'setup' ? '' : awayCards(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="dismiss-season">Not yet</button></div></section>`);
@@ -960,6 +960,7 @@ async function refreshForecast() {
   save();
 }
 
+const isoDaysAgo = (n) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
 /** Daily temperatures for usage dates the station history doesn't cover — automatic, once per session. */
 async function fillArchive() {
   if (archiveTried || !WD.loaded) return;
@@ -968,7 +969,8 @@ async function fillArchive() {
   if (!missing.length) return;
   archiveTried = true;
   try {
-    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${LOC.lat}&longitude=${LOC.lon}&start_date=${missing[0]}&end_date=${missing[missing.length - 1]}&daily=temperature_2m_mean&temperature_unit=fahrenheit&timezone=America%2FNew_York`;
+    // Ask for the whole calendar year up to yesterday, not exactly the dates of your readings: the request then reveals only the year.
+    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${LOC.lat}&longitude=${LOC.lon}&start_date=${missing[0].slice(0, 4)}-01-01&end_date=${isoDaysAgo(1)}&daily=temperature_2m_mean&temperature_unit=fahrenheit&timezone=America%2FNew_York`;
     S.temps = { ...S.temps, ...C.parseOpenMeteoDaily(await fetchJson(url)) };
     save();
     render();
