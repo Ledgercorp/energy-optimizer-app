@@ -1,6 +1,6 @@
 // Offline support: caches the app shell, the public weather files and the read-only Cloudflare weather API as they are fetched.
 // Requests to other sites and your personal data are never cached here.
-const CACHE = 'aeo-v22';
+const CACHE = 'aeo-v23';
 const API = 'https://aeo-public.colbyweiss15.workers.dev';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'core.js', 'weather.js', 'advisor.js', 'thermostat.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 

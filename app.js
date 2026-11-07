@@ -281,9 +281,9 @@ function thermostatCard() {
       : a.action.href ? `<a class="more-link" href="${esc(a.action.href)}">${esc(a.action.label)} ›</a>` : `<p class="fine">${esc(a.action.label)}</p>`;
   const list = (x) => (x.length ? `<ul class="bullets">${x.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '');
   return `<section class="card home thermo"><div class="q"><p class="eyebrow-s">Thermostat</p>
-    <dl class="krows"><div><dt>Currently set to</dt><dd>${esc(setTo)}</dd></div><div><dt>Suggested temperature</dt><dd class="${a.suggested.temp != null && a.kind === 'trial' ? 'sug' : 'nosug'}">${esc(a.suggested.text)}</dd></div></dl>
-    <p class="kline"><b>Why</b> ${esc(a.why)}</p>${act ? `<div class="kline"><b>What to do</b>${act}</div>` : ''}
-    <details class="more"><summary>Why this temperature?</summary>${list(a.reasons)}${a.unknown.length ? `<h3>Still unknown</h3>${list(a.unknown)}` : ''}<p class="fine">The app never changes your thermostat. A suggestion is a one-degree trial, not a proven best setting.</p>${a.kind === 'trial' ? '<button class="link" data-act="thermo-no">Not comfortable for me</button>' : ''}</details></div></section>`;
+    <dl class="krows"><div><dt>Currently</dt><dd>${esc(setTo)}</dd></div><div><dt>My suggestion</dt><dd class="${a.kind === 'trial' ? 'sug' : 'nosug'}">${esc(a.suggested.text)}</dd></div></dl>
+    <p class="kline"><b>Why</b> ${esc(a.why)}</p>${act ? `<div class="kline"><b>Action</b>${act}</div>` : ''}
+    <details class="more"><summary>Why this temperature?</summary>${list(a.reasons)}${a.unknown.length ? `<h3>Still unknown</h3>${list(a.unknown)}` : ''}<p class="fine">The app never changes your thermostat and never assumes it changed. A suggestion is a cautious one-degree experiment, not a proven best setting.</p>${a.kind === 'trial' ? '<button class="link" data-act="thermo-no">Not comfortable for me</button>' : ''}</details></div></section>`;
 }
 function homeSimple(st) {
   const r = report(), b = r.baseline, bv = A.billView({ state: S, temps: allTemps() }), sp = planNow(), fc = bv.forecast, proj = bv.projection, last = usageDays().at(-1)?.date;
@@ -792,7 +792,7 @@ function testCard(e) {
     ${r.method ? `<p class="fine">How it was compared: ${esc(r.method)}.${(r.caveats || []).map((c) => ` ${esc(c)}`).join('')}</p>` : ''}
     ${running ? `<label class="item"><span>Something unusual one day (guests, away)? Leave it out:</span><input type="date" data-exp-exclude="${esc(e.id)}"></label>` : ''}</details>`;
   const actions = running ? `<div class="btnrow"><button class="btn secondary" data-act="exp-end" data-id="${esc(e.id)}">End test</button><button class="btn plain" data-act="exp-edit" data-id="${esc(e.id)}">Correct</button><button class="btn plain danger" data-act="exp-cancel" data-id="${esc(e.id)}">Cancel</button></div>`
-    : e.decision ? `<p class="fine">You chose to ${e.decision === 'keep' ? 'keep this change' : 'go back'}. <button class="link" data-act="exp-decide" data-id="${esc(e.id)}" data-v="">Change</button></p>` : `<div class="btnrow"><button class="btn primary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="keep">Keep the change</button><button class="btn secondary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="revert">Go back</button></div>`;
+    : e.decision ? `<p class="fine">You chose to ${e.decision === 'keep' ? 'keep this change' : 'go back'}. <button class="link" data-act="exp-decide" data-id="${esc(e.id)}" data-v="">Change</button></p>` : `<div class="btnrow"><button class="btn primary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="keep">${e.setpoint ? `Comfortable — keep ${e.setpoint.to}°F` : 'Keep the change'}</button><button class="btn secondary" data-act="exp-decide" data-id="${esc(e.id)}" data-v="revert">${e.setpoint ? `Not comfortable — back to ${e.setpoint.from}°F` : 'Go back'}</button></div>`;
   return `<section class="card test"><p class="eyebrow-s">${running ? 'Testing' : 'Finished test'}</p><h2>${esc(e.title)}</h2><p class="fine">${esc(when)} · from ${esc(shortDate(e.start))}${e.end ? ` to ${esc(shortDate(e.end))}` : ''}</p>
     <p class="result r-${esc(r.status)}">${esc(r.label)}</p>${showDetail}${why}${actions}</section>`;
 }
@@ -873,11 +873,11 @@ function viewTry() {
   const w = tryWindow(d), over = !!w.hours && A.isOvernight(w.hours), unit = over ? 'nights' : 'days', last = usageDays().at(-1)?.date;
   if (d.setpoint && !d.editingId) {
     const sp = d.setpoint, w2 = sp.mode === 'cool' ? 'warm' : 'cold';
-    return `${head}<section class="card flow"><h2 class="biglabel">Set your thermostat to ${sp.to}°F</h2>
+    return `${head}<section class="card flow"><h2 class="biglabel">Try ${sp.to}°F?</h2>
       <p class="lead">${esc(d.title)}</p>
-      <p>Make the change yourself — the app can’t control the thermostat. Keep it there for about two weeks of ${w2} weather. If it isn’t comfortable, go back to ${sp.from}°F any time.</p>
-      <p class="fine">Starting records your thermostat as ${sp.to}°F. Your newest reading is from ${esc(shortDate(last))}; import a newer Delmarva file later to see the result. A one-degree change is small, so the result may say “No clear difference” — the test still tells you whether ${sp.to}°F is comfortable.</p></section>
-      <div class="actionbar"><button class="btn secondary" data-act="try-back">Not now</button><button class="btn primary" data-act="try-start">I’ve started this change</button></div>`;
+      <p>Set the thermostat to ${sp.to}°F yourself — the app can’t control it and records nothing until you tell it you did. Keep it there for about two weeks of ${w2} weather. If it isn’t comfortable, go back to ${sp.from}°F any time.</p>
+      <p class="fine">Tapping the button below is you confirming the thermostat is now at ${sp.to}°F. A one-degree change is small, so the result may say “No clear difference” — that would not be verified savings, but you’d still learn whether ${sp.to}°F is comfortable.</p></section>
+      <div class="actionbar"><button class="btn secondary" data-act="try-back">Not now</button><button class="btn primary" data-act="try-start">I set it to ${sp.to}°F</button></div>`;
   }
   return `${head}<section class="card flow"><h2 class="biglabel">${d.editingId ? 'Save your changes?' : 'Ready to start?'}</h2>
     <p class="lead">${esc(d.title)}</p><p class="summary">${esc(tryWhenText(d))}</p>
@@ -1453,6 +1453,7 @@ const ACTIONS = {
     let list;
     if (d.editingId) list = (S.experiments || []).map((e) => (e.id === d.editingId ? { ...e, ...fields } : e));
     else {
+      if (fields.setpoint) { const fh = forecastHours().find((h) => h.t >= Date.now() - 3600e3), lo = WD.status?.lastObservation; fields.setpoint = { ...fields.setpoint, confirmedAt: `${today}T${hour}`, outdoorF: Number.isFinite(lo?.t) ? lo.t : fh ? fh.tempF : null, metered: S.profile.hvacMetered }; }
       const e = { id: `x${Date.now().toString(36)}`, ...fields, start, startedAt: start === today ? `${today}T${hour}` : `${start}T00`, at: today };
       const clash = (S.experiments || []).find((o) => !o.end && A.windowsOverlap(o, { ...e, end: '' }));
       if (clash && !confirm(`“${clash.title}” is still running at some of the same hours. Two changes at once can’t be told apart — start anyway?`)) return;
@@ -1460,7 +1461,7 @@ const ACTIONS = {
     }
     const next = A.cleanExperiments(list);
     if (next.some((e) => e.invalid)) return toast('That time window isn’t valid. Go back and check it.', true);
-    const th = S.profile.thermostat, setNow = d.setpoint && !d.editingId && th; // starting the test is the user’s confirmation that the thermostat was changed
+    const th = S.profile.thermostat, setNow = d.setpoint && !d.editingId && th; // only this tap — “I set it to …” — is the user’s confirmation that the thermostat was changed
     try { commitAndReload({ ...S, ...(setNow ? { profile: { ...S.profile, thermostat: { ...th, setpoint: d.setpoint.to, confirmed: today } } } : {}), experiments: next }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
     tryDraft = null; location.hash = 'savings'; render(); window.scrollTo(0, 0);
     toast(d.editingId ? 'Saved.' : setNow ? `Recorded: your thermostat is now at ${d.setpoint.to}°F. After about two weeks of warm weather, import a newer Delmarva file.` : 'Test started. After a few nights, import a newer Delmarva file to see how it went.');
@@ -1484,7 +1485,7 @@ const ACTIONS = {
   },
   'exp-decide'(el) {
     const ex = (S.experiments || []).find((e) => e.id === el.dataset.id), v = el.dataset.v || null;
-    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, decision: v } : e)));
+    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, decision: v, ...(e.setpoint ? { comfort: v === 'keep' ? 'ok' : v === 'revert' ? 'no' : undefined, decidedAt: v ? todayIso() : '' } : {}) } : e)));
     const th = S.profile.thermostat;
     if (ex?.setpoint && v && th) S.profile.thermostat = { ...th, setpoint: v === 'keep' ? ex.setpoint.to : ex.setpoint.from, confirmed: todayIso() };
     save(); render();
