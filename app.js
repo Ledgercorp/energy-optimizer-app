@@ -272,6 +272,19 @@ function progressCard() {
 // ---------- v21: Home (three jobs: my bill · is my use normal · what could I try) ----------
 const PLAIN_USE = { typical: 'Your electricity use is around your usual level.', return_to_typical: 'Your electricity use is back around your usual level.', unusually_high: 'Your electricity use is higher than usual lately.', unusually_low: 'Your electricity use is lower than usual lately.', insufficient: 'There isn’t enough history yet to say what’s usual for you.' };
 const agoText = (iso) => { const n = Math.round((Date.parse(`${todayIso()}T12:00:00Z`) - Date.parse(`${iso}T12:00:00Z`)) / 864e5); return n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`; };
+/** Currently set to · Suggested · Why · What to do. The suggestion is calculated from this home’s own evidence; it is never the comfort preference copied back. */
+const adviceNow = () => A.thermostatAdvice({ state: S, temps: allTemps(), hours: forecastHours() });
+function thermostatCard() {
+  const a = adviceNow(), setTo = a.set != null ? `${a.set}°F` : 'Not entered';
+  const act = !a.action ? '' : a.action.kind === 'try' ? `<button class="btn primary" data-act="thermo-try">${esc(a.action.label)}</button>`
+    : a.action.kind === 'experiment' ? `<p class="fine">${esc(a.action.label)}</p>${a.action.enabled ? '<button class="btn secondary" data-act="thermo-try">Start this experiment</button>' : ''}`
+      : a.action.href ? `<a class="more-link" href="${esc(a.action.href)}">${esc(a.action.label)} ›</a>` : `<p class="fine">${esc(a.action.label)}</p>`;
+  const list = (x) => (x.length ? `<ul class="bullets">${x.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '');
+  return `<section class="card home thermo"><div class="q"><p class="eyebrow-s">Thermostat</p>
+    <dl class="krows"><div><dt>Currently set to</dt><dd>${esc(setTo)}</dd></div><div><dt>Suggested temperature</dt><dd class="${a.suggested.temp != null && a.kind === 'trial' ? 'sug' : 'nosug'}">${esc(a.suggested.text)}</dd></div></dl>
+    <p class="kline"><b>Why</b> ${esc(a.why)}</p>${act ? `<div class="kline"><b>What to do</b>${act}</div>` : ''}
+    <details class="more"><summary>Why this temperature?</summary>${list(a.reasons)}${a.unknown.length ? `<h3>Still unknown</h3>${list(a.unknown)}` : ''}<p class="fine">The app never changes your thermostat. A suggestion is a one-degree trial, not a proven best setting.</p>${a.kind === 'trial' ? '<button class="link" data-act="thermo-no">Not comfortable for me</button>' : ''}</details></div></section>`;
+}
 function homeSimple(st) {
   const r = report(), b = r.baseline, bv = A.billView({ state: S, temps: allTemps() }), sp = planNow(), fc = bv.forecast, proj = bv.projection, last = usageDays().at(-1)?.date;
   const lastBill = bv.statements[bv.statements.length - 1];
@@ -281,7 +294,7 @@ function homeSimple(st) {
       : lastBill ? `<p class="eyebrow-s">Your bill</p><p class="bigbill">${usd(lastBill.amount)}</p><p class="lead">Your last bill, ending ${esc(shortDate(lastBill.end))}.</p>`
         : `<p class="eyebrow-s">Your bill</p><p class="lead">We can’t show a bill yet. Add what Delmarva shows on the Bills page.</p>`;
   const use = `<p class="eyebrow-s">Your use</p><p class="lead">${esc(b ? PLAIN_USE[b.status] : 'Your readings are loaded.')}</p><p class="fine">Readings through ${esc(shortDate(last))} (${agoText(last)}).</p>`;
-  const running = (S.experiments || []).filter((e) => !e.end), top = sp.items[0];
+  const running = (S.experiments || []).filter((e) => !e.end), top = sp.items.find((x) => x.id !== 'setpoint');
   let act;
   if (running.length) { const e = running[0], res = expEval(e); act = `<p class="eyebrow-s">Your test</p><p class="lead">Testing: ${esc(e.title)}</p><p class="fine">${esc(res.label)}</p><a class="more-link" href="#savings">See your test ›</a>`; }
   else if (top) act = `<p class="eyebrow-s">Something to try</p><p class="lead">${esc(top.short || top.action)}</p><p class="fine">${top.savings.dollars ? esc(savingLine(top)) : 'We can’t say yet how much it would save.'}</p><button class="btn primary" data-act="try-open" data-src="${esc(top.id)}">Try it</button>`;
@@ -292,6 +305,7 @@ function homeSimple(st) {
   return `${pagehead('Home', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}${pending}
     <section class="card home"><div class="q">${bill}<a class="more-link" href="#bills">See why ›</a></div></section>
     <section class="card home"><div class="q">${use}<a class="more-link" href="#insights">View usage details ›</a></div></section>
+    ${thermostatCard()}
     <section class="card home"><div class="q">${act}</div></section>${sched}
     <nav class="quiet-links" aria-label="More"><a href="#thermostat">Thermostat</a><a href="#weather">Weather</a><a href="#insights">Usage details</a></nav>`;
 }
@@ -317,7 +331,7 @@ function viewThermostat() {
   const hint = A.seasonHint(S.profile, rec.outlook);
   const season = hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)
     ? `<section class="card warn"><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="season-dismiss">Not yet</button></div></section>` : '';
-  return `${back('today', 'Home')}${pagehead('Thermostat', 'The app never changes it — you do')}${hero(st, rec)}${programCard(st, rec)}${season}${zonesCard()}${st.kind === 'ok' ? `<a class="card" href="#schedule"><p class="card-label">Thermostat schedule</p><h2>Programmed ${esc(shortDate(st.programmedOn))}</h2><p>See or print the weekly schedule.</p></a>` : ''}<p class="fine center"><a href="#settings">Edit what the thermostat shows in Settings</a></p>`;
+  return `${back('today', 'Home')}${pagehead('Thermostat', 'The app never changes it — you do')}${thermostatCard()}${hero(st, rec)}${programCard(st, rec)}${season}${zonesCard()}${st.kind === 'ok' ? `<a class="card" href="#schedule"><p class="card-label">Thermostat schedule</p><h2>Programmed ${esc(shortDate(st.programmedOn))}</h2><p>See or print the weekly schedule.</p></a>` : ''}<p class="fine center"><a href="#settings">Edit what the thermostat shows in Settings</a></p>`;
 }
 
 function viewSchedule() {
@@ -857,6 +871,14 @@ function viewTry() {
     <div class="actionbar"><button class="btn secondary" data-act="try-back">Back</button><button class="btn primary" data-act="try-next">Next</button></div>`;
   }
   const w = tryWindow(d), over = !!w.hours && A.isOvernight(w.hours), unit = over ? 'nights' : 'days', last = usageDays().at(-1)?.date;
+  if (d.setpoint && !d.editingId) {
+    const sp = d.setpoint, w2 = sp.mode === 'cool' ? 'warm' : 'cold';
+    return `${head}<section class="card flow"><h2 class="biglabel">Set your thermostat to ${sp.to}°F</h2>
+      <p class="lead">${esc(d.title)}</p>
+      <p>Make the change yourself — the app can’t control the thermostat. Keep it there for about two weeks of ${w2} weather. If it isn’t comfortable, go back to ${sp.from}°F any time.</p>
+      <p class="fine">Starting records your thermostat as ${sp.to}°F. Your newest reading is from ${esc(shortDate(last))}; import a newer Delmarva file later to see the result. A one-degree change is small, so the result may say “No clear difference” — the test still tells you whether ${sp.to}°F is comfortable.</p></section>
+      <div class="actionbar"><button class="btn secondary" data-act="try-back">Not now</button><button class="btn primary" data-act="try-start">I’ve started this change</button></div>`;
+  }
   return `${head}<section class="card flow"><h2 class="biglabel">${d.editingId ? 'Save your changes?' : 'Ready to start?'}</h2>
     <p class="lead">${esc(d.title)}</p><p class="summary">${esc(tryWhenText(d))}</p>
     <p>${d.editingId ? 'Your test keeps its start. Only the details change.' : `Make the change yourself — the app can’t control anything. We’ll compare your electricity readings after you’ve tried it for several ${unit}.`}</p>
@@ -1400,13 +1422,22 @@ const ACTIONS = {
   'household-review'() { if (householdUpdate) { pendingRestore = { name: 'Mac companion', kind: 'household', update: householdUpdate }; location.hash = 'restore'; render(); } },
   'try-open'(el) {
     const sp = planNow(), o = el.dataset.src ? [...sp.items, ...sp.considered].find((x) => x.id === el.dataset.src) : null, x = o?.experiment;
-    tryDraft = newTry(x ? { title: x.title, from: x.hours ? hhmm(x.hours[0]) : '22:00', until: x.hours ? hhmm(x.hours[1] % 24) : '06:00', allDay: !x.hours, cooling: !!x.cooling, mode: x.days ? 'specific' : 'every', days: x.days || [] } : {});
+    tryDraft = newTry(x ? { title: x.title, from: x.hours ? hhmm(x.hours[0]) : '22:00', until: x.hours ? hhmm(x.hours[1] % 24) : '06:00', allDay: !x.hours, cooling: !!x.cooling, mode: x.days ? 'specific' : 'every', days: x.days || [], ...(x.setpoint ? { setpoint: x.setpoint, step: 3 } : {}) } : {});
     location.hash = 'try'; render(); window.scrollTo(0, 0);
+  },
+  'thermo-try'() {
+    const tr = adviceNow().trial; if (!tr) return;
+    tryDraft = newTry({ step: 3, title: `${tr.mode === 'cool' ? 'Cooling' : 'Heating'} held at ${tr.to}°F instead of ${tr.from}°F`, allDay: true, cooling: true, setpoint: tr });
+    location.hash = 'try'; render(); window.scrollTo(0, 0);
+  },
+  'thermo-no'() {
+    const a = adviceNow(), th = S.profile.thermostat; if (!a.trial || !th) return;
+    S.profile.thermostat = { ...th, declined: [...new Set([...(th.declined || []), a.trial.to])] }; save(); render(); toast(`OK. The app won’t suggest ${a.trial.to}°F again.`);
   },
   'try-example'(el) { const t = document.getElementById('try-title'); if (t) { t.value = el.dataset.v; t.focus(); } },
   'try-mode'(el) { tryReadStep(); tryDraft.mode = el.dataset.v; render(); },
   'try-dow'(el) { tryReadStep(); const i = +el.dataset.v; tryDraft.days = tryDraft.days.includes(i) ? tryDraft.days.filter((x) => x !== i) : [...tryDraft.days, i]; render(); },
-  'try-back'() { tryReadStep(); if (tryDraft.step > 1) { tryDraft.step--; render(); window.scrollTo(0, 0); } else { location.hash = 'savings'; } },
+  'try-back'() { tryReadStep(); if (tryDraft.setpoint && !tryDraft.editingId) { tryDraft = null; location.hash = 'savings'; } else if (tryDraft.step > 1) { tryDraft.step--; render(); window.scrollTo(0, 0); } else { location.hash = 'savings'; } },
   'try-next'() {
     tryReadStep();
     const d = tryDraft, say = (m) => { const e = document.getElementById('try-err'); if (e) e.textContent = m; };
@@ -1418,7 +1449,7 @@ const ACTIONS = {
     const d = tryDraft, w = tryWindow(d);
     if (!d || w.error || !d.title.trim()) return toast(w?.error || 'Describe the change first.', true);
     const today = todayIso(), start = d.startDate || today, hour = String(C.localParts(Date.now()).hour).padStart(2, '0');
-    const fields = { title: d.title.trim().slice(0, 160), hours: w.hours, days: w.days, watts: +d.watts || null, hoursPerDay: +d.hpd || null, cooling: !!d.cooling };
+    const fields = { title: d.title.trim().slice(0, 160), hours: w.hours, days: w.days, watts: +d.watts || null, hoursPerDay: +d.hpd || null, cooling: !!d.cooling, ...(d.setpoint ? { setpoint: d.setpoint } : {}) };
     let list;
     if (d.editingId) list = (S.experiments || []).map((e) => (e.id === d.editingId ? { ...e, ...fields } : e));
     else {
@@ -1429,20 +1460,22 @@ const ACTIONS = {
     }
     const next = A.cleanExperiments(list);
     if (next.some((e) => e.invalid)) return toast('That time window isn’t valid. Go back and check it.', true);
-    try { commitAndReload({ ...S, experiments: next }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    const th = S.profile.thermostat, setNow = d.setpoint && !d.editingId && th; // starting the test is the user’s confirmation that the thermostat was changed
+    try { commitAndReload({ ...S, ...(setNow ? { profile: { ...S.profile, thermostat: { ...th, setpoint: d.setpoint.to, confirmed: today } } } : {}), experiments: next }, 'experiment'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
     tryDraft = null; location.hash = 'savings'; render(); window.scrollTo(0, 0);
-    toast(d.editingId ? 'Saved.' : 'Test started. After a few nights, import a newer Delmarva file to see how it went.');
+    toast(d.editingId ? 'Saved.' : setNow ? `Recorded: your thermostat is now at ${d.setpoint.to}°F. After about two weeks of warm weather, import a newer Delmarva file.` : 'Test started. After a few nights, import a newer Delmarva file to see how it went.');
   },
   'exp-edit'(el) {
     const e = (S.experiments || []).find((x) => x.id === el.dataset.id); if (!e) return;
     const mode = !e.days ? 'every' : [...e.days].join() === '1,2,3,4,5' ? 'weekdays' : [...e.days].join() === '0,6' ? 'weekends' : 'specific';
-    tryDraft = newTry({ step: 1, title: e.title, mode, days: e.days || [], from: e.hours ? hhmm(e.hours[0]) : '22:00', until: e.hours ? hhmm(e.hours[1] % 24) : '06:00', allDay: !e.hours, watts: e.watts || '', hpd: e.hoursPerDay || '', cooling: e.cooling, editingId: e.id, startDate: '' });
+    tryDraft = newTry({ step: 1, title: e.title, mode, days: e.days || [], from: e.hours ? hhmm(e.hours[0]) : '22:00', until: e.hours ? hhmm(e.hours[1] % 24) : '06:00', allDay: !e.hours, watts: e.watts || '', hpd: e.hoursPerDay || '', cooling: e.cooling, editingId: e.id, startDate: '', setpoint: e.setpoint || null });
     location.hash = 'try'; render(); window.scrollTo(0, 0);
   },
   'exp-cancel'(el) {
     const e = (S.experiments || []).find((x) => x.id === el.dataset.id); if (!e) return;
-    if (!confirm(`Cancel “${e.title}”? The test is removed (you can undo from Settings).`)) return;
-    try { commitAndReload({ ...S, experiments: (S.experiments || []).filter((x) => x.id !== e.id) }, 'cancel test'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
+    if (!confirm(`Cancel “${e.title}”? The test is removed (you can undo from Settings).${e.setpoint ? ` The app will record your thermostat as back at ${e.setpoint.from}°F — set it back too.` : ''}`)) return;
+    const th = S.profile.thermostat, back = e.setpoint && !e.end && th ? { profile: { ...S.profile, thermostat: { ...th, setpoint: e.setpoint.from, confirmed: todayIso() } } } : {};
+    try { commitAndReload({ ...S, ...back, experiments: (S.experiments || []).filter((x) => x.id !== e.id) }, 'cancel test'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
     render(); toast('Test cancelled.');
   },
   'exp-end'(el) {
@@ -1450,8 +1483,12 @@ const ACTIONS = {
     save(); render(); toast('Test ended. The result uses the days up to today.');
   },
   'exp-decide'(el) {
-    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, decision: el.dataset.v || null } : e)));
+    const ex = (S.experiments || []).find((e) => e.id === el.dataset.id), v = el.dataset.v || null;
+    S.experiments = A.cleanExperiments((S.experiments || []).map((e) => (e.id === el.dataset.id ? { ...e, decision: v } : e)));
+    const th = S.profile.thermostat;
+    if (ex?.setpoint && v && th) S.profile.thermostat = { ...th, setpoint: v === 'keep' ? ex.setpoint.to : ex.setpoint.from, confirmed: todayIso() };
     save(); render();
+    if (ex?.setpoint && v) toast(v === 'keep' ? `The app now shows your thermostat at ${ex.setpoint.to}°F.` : `Set your thermostat back to ${ex.setpoint.from}°F. The app now shows ${ex.setpoint.from}°F.`);
   },
 
   'usual-save'() {
