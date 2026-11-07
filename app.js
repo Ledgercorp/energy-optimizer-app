@@ -297,7 +297,7 @@ function homeSimple(st) {
   const running = (S.experiments || []).filter((e) => !e.end), top = sp.items.find((x) => x.id !== 'setpoint');
   let act;
   if (running.length) { const e = running[0], res = expEval(e); act = `<p class="eyebrow-s">Your test</p><p class="lead">Testing: ${esc(e.title)}</p><p class="fine">${esc(res.label)}</p><a class="more-link" href="#savings">See your test ›</a>`; }
-  else if (top) act = `<p class="eyebrow-s">Something to try</p><p class="lead">${esc(top.short || top.action)}</p><p class="fine">${top.savings.dollars ? esc(savingLine(top)) : 'We can’t say yet how much it would save.'}</p><button class="btn primary" data-act="try-open" data-src="${esc(top.id)}">Try it</button>`;
+  else if (top) act = `<p class="eyebrow-s">Something to try</p><p class="lead">${esc(top.short || top.action)}</p>${top.savings.dollars ? `<p class="fine">${esc(savingLine(top))}</p>` : ''}<button class="btn primary" data-act="try-open" data-src="${esc(top.id)}">Try it</button>`;
   else act = `<p class="eyebrow-s">Something to try</p><p class="lead">Nothing is clearly worth changing right now.</p><a class="more-link" href="#savings">Savings ›</a>`;
   const pending = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id)
     ? `<section class="card notice"><p><b>An update is waiting from your Mac.</b> It adds your confirmed settings${householdUpdate.projection ? ' and a Delmarva projection' : ''}.</p><button class="btn secondary" data-act="household-review">Review</button></section>` : '';
@@ -805,7 +805,7 @@ function viewSavingsTab() {
   const ideas = sp.items.slice(0, 2);
   out.push(`<h2 class="section-title">Ideas</h2>`);
   if (!ideas.length) out.push('<section class="card"><p>Nothing in your readings clearly points to a saving right now.</p></section>');
-  for (const o of ideas) out.push(`<section class="card idea"><h2>${esc(o.short || o.action)}</h2><p>${esc(o.savings.dollars ? savingLine(o) : 'We can’t say yet how much this would save.')}</p>
+  for (const o of ideas) out.push(`<section class="card idea"><h2>${esc(o.short || o.action)}</h2>${o.savings.dollars ? `<p>${esc(savingLine(o))}</p>` : ''}
     <details class="more"><summary>Why this, and how we’d know</summary><p>${esc(o.why)}</p><dl class="facts"><dt>Evidence</dt><dd>${esc(o.evidence || '')}</dd><dt>Can you control it?</dt><dd>${esc(CONTROL[o.control] || o.control)}</dd><dt>How it’s worked out</dt><dd>${esc(o.savings.method)}</dd><dt>Effort</dt><dd>${esc(EFFORT[o.effort])}</dd><dt>Comfort</dt><dd>${esc(COMFORT[o.comfort])}</dd><dt>How we’ll know</dt><dd>${esc(o.verify)}</dd></dl>${o.caveat ? `<p class="fine">${esc(o.caveat)}</p>` : ''}${o.thermostat ? '<p class="fine">Involves the thermostat — the app never changes it; you do.</p>' : ''}</details>
     ${o.experiment ? `<button class="btn secondary" data-act="try-open" data-src="${esc(o.id)}">Try this</button>` : ''}</section>`);
   if (done.length) out.push(`<h2 class="section-title">Finished tests</h2>${done.map(testCard).join('')}`);
@@ -826,6 +826,12 @@ function tryReadStep() {
 const TRY_EXAMPLES = ['Unplug my living room TV overnight', 'Turn off the office computer at night', 'Switch off the old game console'];
 const newTry = (over = {}) => ({ step: 1, title: '', mode: 'every', days: [], from: '22:00', until: '06:00', allDay: false, watts: '', hpd: '', cooling: false, startDate: '', editingId: null, ...over });
 const hhmm = (h) => `${String(h % 24).padStart(2, '0')}:00`;
+// Hourly meter readings mean the app needs hourly choices, not iOS's full minute picker.
+// Compact AM/PM labels fit a 320px phone without hiding half the selected time.
+const hourChoices = (selected) => Array.from({ length: 24 }, (_, h) => {
+  const value = hhmm(h), label = `${h % 12 || 12} ${h < 12 ? 'AM' : 'PM'}`;
+  return `<option value="${value}" ${selected === value ? 'selected' : ''}>${label}</option>`;
+}).join('');
 const parseHr = (v) => { const [h, m] = String(v || '').split(':').map(Number); return Number.isFinite(h) ? (m >= 30 ? h + 1 : h) % 24 : null; };
 function tryWindow(d) {
   const days = d.mode === 'weekdays' ? [1, 2, 3, 4, 5] : d.mode === 'weekends' ? [0, 6] : d.mode === 'specific' ? [...d.days].sort() : null;
@@ -858,7 +864,7 @@ function viewTry() {
     return `${head}<section class="card flow"><h2 class="biglabel">When will you do it?</h2>
       <div class="chips choice" role="radiogroup" aria-label="Which days">${modes.map(([k, l]) => `<button type="button" role="radio" aria-checked="${d.mode === k}" class="${d.mode === k ? 'on' : ''}" data-act="try-mode" data-v="${k}">${l}</button>`).join('')}</div>
       ${d.mode === 'specific' ? `<div class="chips days" role="group" aria-label="Pick days">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((l, i) => `<button type="button" aria-pressed="${d.days.includes(i)}" aria-label="${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][i]}" class="${d.days.includes(i) ? 'on' : ''}" data-act="try-dow" data-v="${i}">${l}</button>`).join('')}</div>` : ''}
-      <div class="timepair ${d.allDay ? 'off' : ''}"><label>From<input id="try-from" type="time" step="3600" value="${esc(d.from)}" ${d.allDay ? 'disabled' : ''}></label><span aria-hidden="true">→</span><label>Until<input id="try-until" type="time" step="3600" value="${esc(d.until)}" ${d.allDay ? 'disabled' : ''}></label></div>
+      <div class="timepair ${d.allDay ? 'off' : ''}"><label>From<select id="try-from" aria-label="From hour" ${d.allDay ? 'disabled' : ''}>${hourChoices(d.from)}</select></label><span aria-hidden="true">→</span><label>Until<select id="try-until" aria-label="Until hour" ${d.allDay ? 'disabled' : ''}>${hourChoices(d.until)}</select></label></div>
       <label class="check"><input type="checkbox" id="try-allday" ${d.allDay ? 'checked' : ''}> All day, no specific hours</label>
       <p class="summary" id="try-summary" aria-live="polite">${esc(tryWhenText(d))}</p>
       <p class="fine">Readings are hourly, so times are rounded to the hour. Past midnight is fine: 10 PM to 6 AM is one night.</p>
