@@ -460,3 +460,14 @@ details.more.card-more { overflow-x: clip; }
 .timepair label, .timepair input { min-width: 0; }
 .timepair input { font-size: 18px; padding: 8px 6px; }
 @media (max-width: 380px) { .card .bigbill { font-size: 42px; } }
+
+/* v22: thermostat card */
+.krows { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0 12px; }
+.krows div { min-width: 0; }
+.krows dt { font-size: 13px; color: var(--ink-3); }
+.krows dd { margin: 2px 0 0; font-size: 28px; font-weight: 720; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.krows dd.sug { color: var(--tint); }
+.krows dd.nosug { font-size: 20px; font-weight: 650; line-height: 1.2; color: var(--ink-2); }
+.kline { margin: 8px 0; font-size: 16px; line-height: 1.4; }
+.kline > b { display: block; font-size: 13px; font-weight: 600; color: var(--ink-3); margin-bottom: 2px; }
+.thermo details.more h3 { margin-top: 12px; }
