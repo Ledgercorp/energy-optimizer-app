@@ -2199,11 +2199,11 @@ export function savingsPlan({ state, temps = {}, now = Date.now() }) {
   if (base != null && p.buildingMode !== 'heat_available') {
     const meterNote = metered === 'yes' ? '' : metered === 'no' ? ' Cooling isn’t on your meter, so this wouldn’t change your bill.' : ' It isn’t confirmed that the cooling equipment runs on your meter, so any saving may not show on your bill.';
     const ta = thermostatAdvice({ state, temps, now }), tr = ta.trial, ev = ta.evidence;
-    if (metered !== 'no' && tr && ['trial', 'unknown'].includes(ta.kind)) add({ id: 'setpoint', short: `Try ${tr.to}°F instead of ${tr.from}°F`, thermostat: true, control: 'yes', action: `Optional test: hold ${tr.to}°F instead of ${tr.from}°F for two weeks of warm weather, then go back if it isn’t comfortable.`,
-      why: `You hold ${base}°F on purpose — that stays your baseline, not a recommendation. ${ev ? `Your readings suggest about ${fmt(ev.range[0], 1)}–${fmt(ev.range[1], 1)} kWh a warm day per degree (a model, not a measurement).` : 'Your readings can’t say what a degree is worth, so this is an experiment, not a calculated saving.'}${meterNote} Comfort comes first: go back if it isn’t comfortable.`,
-      evidence: cs ? `Measured: ${cs.n} days of readings with outdoor temperatures; your confirmed setting (${base}°F HOLD, programming off).` : `Your confirmed setting (${base}°F HOLD, programming off).`,
-      savings: { kind: 'unknown', dollars: null, method: ev && !ev.detectable ? `Modelled at about ${fmt(ev.perDay, 1)} kWh a warm day, which is below what a two-week test could show (about ${fmt(ev.mde, 1)} kWh), so the result will probably say “No clear difference”.` : 'Not estimated. The test measures it directly and allows for the weather.' },
-      confidence: 'low', effort: 'low', comfort: 'slight', verify: 'Start a test; the comparison allows for outdoor temperature. The app never changes the thermostat — you set it, and set it back.',
+    if (metered !== 'no' && tr && ta.kind === 'trial') add({ id: 'setpoint', short: `Try ${tr.to}°F instead of ${tr.from}°F`, thermostat: true, control: 'yes', action: `Optional experiment: set ${tr.to}°F instead of ${tr.from}°F for about two weeks of warm weather, then go back if it isn’t comfortable.`,
+      why: `You hold ${base}°F on purpose — that stays your baseline, not a recommendation. ${tr.to}°F is a cautious one-degree experiment for comfort and possible savings; the app can’t say how much it would save.${meterNote} Comfort comes first: go back if it isn’t comfortable.`,
+      evidence: ev.verified ? `Measured in your own test: ${ev.verified.from}°F → ${ev.verified.to}°F saved about ${ev.verified.range[0]}–${ev.verified.range[1]} kWh a day.` : `Your confirmed setting (${base}°F HOLD, programming off). No finished test of yours shows a saving yet.`,
+      savings: { kind: 'unknown', dollars: null, method: `Not estimated. Only a valid test can measure it, and a one-degree change may be too small for hourly whole-home readings to show (a two-week test could only show about ${fmt(ev.mde ?? 0, 1)} kWh a day or more).` },
+      confidence: 'low', effort: 'low', comfort: 'slight', verify: 'Confirm the change when you make it, then import newer readings; the comparison allows for the weather. The app never changes the thermostat — you do.',
       caveat: metered === 'yes' ? '' : 'Whether cooling is on your meter is unconfirmed.', experiment: { title: `Cooling held at ${tr.to}°F instead of ${tr.from}°F`, hours: null, days: null, cooling: true, setpoint: tr } });
     else considered.push({ id: 'setpoint', what: `Change the setting from ${base}°F`, why: metered === 'no' ? 'Cooling isn’t on your meter, so it wouldn’t change your bill.' : ta.why });
   } else if (cs && cs.per_cdd > 2 * cs.se && cs.r2 >= 0.3 && metered === 'yes' && p.buildingMode !== 'heat_available') {
@@ -2334,7 +2334,10 @@ export function windowsOverlap(a, b) {
 }
 export const PLAIN_RESULT = { reduced: 'Electricity use went down.', increased: 'Electricity use went up.', inconclusive: 'No clear difference.', collecting: 'We need more readings.', too_small: 'Too small for the meter to show.', confounded: 'Can’t tell — another change overlapped.', invalid: 'This test needs a valid time.' };
 
-const cleanSetpoint = (s) => (s && ['cool', 'heat'].includes(s.mode) && [s.from, s.to].every((x) => Number.isInteger(x) && x >= 50 && x <= 90) && s.from !== s.to ? { mode: s.mode, from: s.from, to: s.to } : null);
+const HOUR_KEY = /^\d{4}-\d{2}-\d{2}T\d{2}$/;
+/** A temperature test. `confirmedAt` exists only when the user said they changed the thermostat; older saves that have a start moment keep it (that tap was the confirmation). */
+const cleanSetpoint = (s, startedAt) => (s && ['cool', 'heat'].includes(s.mode) && [s.from, s.to].every((x) => Number.isInteger(x) && x >= 50 && x <= 90) && s.from !== s.to
+  ? { mode: s.mode, from: s.from, to: s.to, ...(HOUR_KEY.test(s.confirmedAt || startedAt || '') ? { confirmedAt: s.confirmedAt || startedAt } : {}), ...(Number.isFinite(s.outdoorF) && s.outdoorF > -40 && s.outdoorF < 130 ? { outdoorF: Math.round(s.outdoorF) } : {}), ...(['yes', 'partial', 'no', 'unknown'].includes(s.metered) ? { metered: s.metered } : {}) } : null);
 /** Sanitise experiments the household created. A window that makes no sense is flagged invalid — never turned into a whole-day test. */
 export function cleanExperiments(list) {
   return (Array.isArray(list) ? list : []).filter((e) => e && typeof e.id === 'string' && typeof e.title === 'string' && isIso(e.start)).slice(-40).map((e) => {
@@ -2349,7 +2352,7 @@ export function cleanExperiments(list) {
       startedAt: /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(e.startedAt || '') ? e.startedAt : '', hours, ...(invalid ? { invalid } : {}),
       days: Array.isArray(e.days) && e.days.length && e.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ? [...new Set(e.days)].sort() : null,
       watts: Number.isFinite(+e.watts) && +e.watts > 0 && +e.watts < 10000 ? +e.watts : null, hoursPerDay: Number.isFinite(+e.hoursPerDay) && +e.hoursPerDay > 0 && +e.hoursPerDay <= 24 ? +e.hoursPerDay : null,
-      cooling: e.cooling === true, ...(cleanSetpoint(e.setpoint) ? { setpoint: cleanSetpoint(e.setpoint) } : {}), exclude: (Array.isArray(e.exclude) ? e.exclude : []).filter(isIso).slice(0, 60), decision: ['keep', 'revert'].includes(e.decision) ? e.decision : null,
+      cooling: e.cooling === true, ...(cleanSetpoint(e.setpoint, e.startedAt) ? { setpoint: cleanSetpoint(e.setpoint, e.startedAt) } : {}), ...(['ok', 'no'].includes(e.comfort) ? { comfort: e.comfort } : {}), ...(isIso(e.decidedAt) ? { decidedAt: e.decidedAt } : {}), exclude: (Array.isArray(e.exclude) ? e.exclude : []).filter(isIso).slice(0, 60), decision: ['keep', 'revert'].includes(e.decision) ? e.decision : null,
       note: String(e.note || '').slice(0, 300), at: isIso(e.at) ? e.at : e.start,
     };
   }).sort((a, b) => (a.start < b.start ? -1 : 1));
@@ -2591,97 +2594,82 @@ export function forecastAccuracy(state) {
   return { rows, pending: cleanProjections(state.projections).filter((p) => !finalBillFor(p, bills)).length, text: rows.length ? '' : 'No projection has been compared with a final bill yet. The first check happens when the bill for the current period arrives.' };
 }
 
-// ---------- v22: thermostat suggestion (independent of the comfort preference) ----------
-// Three different things, never mixed up:
-//   set        what the thermostat is actually set to (confirmed by the user)           — a fact
-//   comfort    what the user says is comfortable (Settings)                              — a limit, not a suggestion
-//   suggested  what the app's own evidence says is worth trying (or “not enough evidence”) — a calculation
-// The app never changes the thermostat. A suggestion is a one-degree trial, never called “optimal”.
+// ---------- v23: thermostat suggestion — three kinds of statement, never mixed ----------
+//   set       the temperature the user confirmed the thermostat is at                        — a fact they entered
+//   to try    a cautious next temperature for a comfort-and-savings experiment               — a proposal, not a finding
+//   verified  electricity saved, measured by a finished and valid test of THIS home          — evidence; absent until it exists
+// Outdoor-weather sensitivity only says WHEN cooling matters. It is never converted into kWh per degree of thermostat change:
+// a degree outdoors and a degree on the setpoint are different physical changes. The temperature chosen is a one-degree step inside
+// the user’s limits — not an optimum. The app never changes the thermostat and never assumes it changed.
 
-const TRIAL_STEP = 1, MAX_STEPS = 2;
+const MAX_STEPS = 2;
 const setpointTests = (state, mode) => cleanExperiments(state.experiments).filter((e) => e.setpoint && e.setpoint.mode === mode && !e.invalid);
 
-/** Pooled, weather-adjusted result of finished temperature tests, as kWh a day per degree of saving. */
-function measuredSetpoint({ state, temps, tests, now }) {
-  const rows = [];
-  for (const e of tests.filter((x) => x.end)) {
-    const r = evaluateExperiment({ state, temps, exp: e, now }), step = Math.abs(e.setpoint.to - e.setpoint.from) || 1;
-    rows.push({ id: e.id, from: e.setpoint.from, to: e.setpoint.to, start: e.start, end: e.end, decision: e.decision, status: r.status, perDeg: r.diff_kwh != null ? -r.diff_kwh / step : null, se: r.ci ? (r.ci[1] - r.ci[0]) / (2 * 1.96 * step) : null });
-  }
-  const ok = rows.filter((r) => r.perDeg != null && r.se > 0 && ['reduced', 'increased', 'inconclusive'].includes(r.status));
-  if (!ok.length) return { rows, pooled: null };
-  const w = ok.map((r) => 1 / r.se ** 2), est = sum(ok.map((r, i) => r.perDeg * w[i])) / sum(w), se = Math.sqrt(1 / sum(w));
-  return { rows, pooled: { perDeg: r2(est), se: r2(se), lo: r2(est - 1.96 * se), hi: r2(est + 1.96 * se), n: ok.length } };
+/** Finished, confirmed tests, judged one at a time. Only a valid test with a clear result counts; inconclusive ones are never combined into a number. */
+function judgeTests({ state, temps, tests, now }) {
+  const metered = state.profile.hvacMetered;
+  return tests.filter((e) => e.end && e.setpoint.confirmedAt).map((e) => {
+    const r = evaluateExperiment({ state, temps, exp: e, now });
+    const valid = ['reduced', 'increased', 'inconclusive'].includes(r.status) && metered !== 'no';
+    return { id: e.id, from: e.setpoint.from, to: e.setpoint.to, start: e.start, end: e.end, decision: e.decision, comfort: e.comfort, status: r.status, valid, mde: r.mde_kwh ?? null, diff: r.diff_kwh ?? null, ci: r.ci ?? null, days: r.days_after ?? 0, why: r.status };
+  });
 }
 
 /**
- * The thermostat card: { set, comfort, suggested:{temp|null,text}, kind, why, action, reasons[], unknown[], key }.
- * kind: trial (a calculated one-degree trial) · unknown (not enough evidence; maybe a specific experiment) · keep (evidence says stay) ·
- *       none (a setting can’t change the bill) · running · decide
- * `hours` is the hourly forecast ({t, tempF}). The suggested temperature depends on evidence, comfort limits and past tests — not on
- * today’s weather, so it doesn’t flip day to day; only the advice about *when* to try it follows the forecast.
+ * The thermostat card: { set, comfort, suggested:{temp|null,text}, kind, why, action, reasons[], unknown[], evidence, key }.
+ * kind: trial (a temperature to try) · keep (keep the current setting for now — evidence, limits or comfort say so) · running · decide · unknown (setting not entered)
+ * `hours` is the hourly forecast ({t, tempF}). The temperature does not depend on today’s weather, so the card doesn’t flip day to day; only “when to try it” does.
  */
 export function thermostatAdvice({ state, temps = {}, hours = [], now = Date.now() }) {
   const p = state.profile, th = p.thermostat, c = p.comfort || {};
   const mode = th?.mode || (p.buildingMode === 'heat_available' ? 'heat' : 'cool'), dir = mode === 'cool' ? 1 : -1, word = mode === 'cool' ? 'cooling' : 'heating';
   const base = th ? th.setpoint : null, pref = Number.isFinite(c[mode]?.home) ? c[mode].home : null;
-  const limit = dir > 0 ? (c.max ?? 85) : (c.min ?? 60);
-  const out = { mode, set: base, confirmed: th?.confirmed || '', hold: !!th?.hold, comfort: { preference: pref, limit }, suggested: { temp: null, text: 'Not enough evidence yet' }, kind: 'unknown', phase: null, why: '', action: null, reasons: [], unknown: [], trial: null };
+  const limit = dir > 0 ? (c.max ?? 85) : (c.min ?? 60); // a safety bound from Settings, not a tested comfort maximum
+  const out = { mode, set: base, confirmed: th?.confirmed || '', hold: !!th?.hold, comfort: { preference: pref, limit }, suggested: { temp: null, text: '—' }, kind: 'unknown', phase: null, why: '', action: null, reasons: [], unknown: [], trial: null, evidence: { level: 'none', verified: null } };
   const fin = (o) => { Object.assign(out, o); out.key = [out.mode, base, out.suggested.temp, out.kind, out.phase].join('|'); return out; };
-  const rf = rateFor(state), $ = (k) => (rf.rate != null ? `${'$'}${fmt(k * rf.rate, 2)}` : null);
-  const tests = setpointTests(state, mode), running = tests.find((e) => !e.end), undecided = tests.filter((e) => e.end && !e.decision).pop();
-  const t = (x) => `${x}°F`;
-  if (base == null) return fin({ why: 'The app doesn’t know your thermostat’s setting yet, so it can’t say what to change it to.', action: { kind: 'info', label: 'Enter your thermostat setting', href: '#settings' }, unknown: ['What your thermostat is set to.'] });
-  out.reasons.push(`You confirmed ${t(base)}${th.hold ? ' on HOLD' : ''}${th.confirmed ? ` on ${th.confirmed}` : ''}. That is your starting point — a fact you entered, not something the app worked out.`);
-  if (pref != null) out.reasons.push(`Your comfort preference in Settings is ${t(pref)}. The app does not copy it into a suggestion; it is only used as a comfort limit.`);
-  if (running) return fin({ kind: 'running', suggested: { temp: running.setpoint.to, text: `Testing ${t(running.setpoint.to)}` }, why: `You’re testing ${t(running.setpoint.to)} instead of ${t(running.setpoint.from)}.`, action: { kind: 'see', label: 'See your test', href: '#savings' } });
-  if (undecided) return fin({ kind: 'decide', suggested: { temp: null, text: 'Decide about your last test' }, why: `Your ${t(undecided.setpoint.to)} test has ended. Was it comfortable?`, action: { kind: 'see', label: 'Keep it or go back', href: '#savings' } });
+  const t = (x) => `${x}°F`, keep = (why, kind = 'keep', extra = {}) => fin({ kind, suggested: { temp: base, text: `Keep ${t(base)} for now` }, why, ...extra });
+  if (base == null) return fin({ why: 'The app doesn’t know your thermostat’s setting yet.', action: { kind: 'info', label: 'Enter your thermostat setting', href: '#settings' }, unknown: ['What your thermostat is set to.'] });
+  const all = setpointTests(state, mode), tests = all.map((e) => (e.setpoint.confirmedAt ? e : null)).filter(Boolean); // a test you only planned has not happened
+  const running = tests.find((e) => !e.end), undecided = tests.filter((e) => e.end && !e.decision).pop();
+  out.reasons.push(`Confirmed: ${t(base)}${th.hold ? ' on HOLD' : ''}, entered by you${th.confirmed ? ` on ${th.confirmed}` : ''}. That is a fact you gave the app, not a recommendation.`);
+  if (running) return fin({ kind: 'running', suggested: { temp: running.setpoint.to, text: `Testing ${t(running.setpoint.to)}` }, why: `You told the app you set the thermostat to ${t(running.setpoint.to)} on ${running.setpoint.confirmedAt.slice(0, 10)}.`, action: { kind: 'see', label: 'See your test', href: '#savings' } });
+  if (undecided) return fin({ kind: 'decide', suggested: { temp: null, text: 'Tell us how it felt' }, why: `Your ${t(undecided.setpoint.to)} test has ended. Was it comfortable?`, action: { kind: 'see', label: 'Answer and decide', href: '#savings' } });
   const known = C.BUILDING_MODES[p.buildingMode];
-  if (p.hvacMetered === 'no' || (known && p.buildingMode !== 'unknown' && !known.includes(mode))) {
-    return fin({ kind: 'none', suggested: { temp: null, text: 'Nothing to change' }, why: p.hvacMetered === 'no' ? `You said ${word} isn’t on your electric meter, so a different setting wouldn’t change your bill. Set it for comfort.` : `The building isn’t ${word} right now, so the setting has no effect.` });
-  }
+  if (p.hvacMetered === 'no') return keep(`You said ${word} isn’t on your electric meter, so a different setting wouldn’t change your bill. Set it for comfort.`, 'none');
+  if (known && p.buildingMode !== 'unknown' && !known.includes(mode)) return keep(`The building isn’t ${word} right now, so the setting has no effect.`, 'none');
 
-  // 1. How strongly does this home’s electricity follow the weather — in the mode that matters?
-  const m = C.energyWeatherModel(state.usage, temps), term = m.status === 'ready' ? (mode === 'cool' ? m.cool : m.heat) : null;
-  const sensitive = !!term && term.per > 0 && term.per > term.ci;
-  // 2. Past temperature tests: the strongest evidence this home can give.
-  const meas = measuredSetpoint({ state, temps, tests, now }), pooled = meas.pooled;
-  // 3. Which temperature is next, within comfort and a gentle two-degree range from where the household started.
+  // What finished tests of this home say — one at a time.
+  const rows = judgeTests({ state, temps, tests, now }), valid = rows.filter((r) => r.valid);
+  const verified = [...valid].reverse().find((r) => r.status === 'reduced' && r.ci && r.ci[1] < 0) || null;
+  if (verified) out.evidence = { level: 'verified', verified: { from: verified.from, to: verified.to, kwhPerDay: r2(-verified.diff), range: [r2(-verified.ci[1]), r2(-verified.ci[0])], days: verified.days, start: verified.start, end: verified.end } };
+  for (const r of rows) out.reasons.push(`Your ${t(r.to)} test (${r.start} to ${r.end}): ${r.valid ? (PLAIN_RESULT[r.status] || r.status) : 'not usable as evidence'}${r.comfort ? `; you said it was ${r.comfort === 'ok' ? 'comfortable' : 'not comfortable'}` : ''}${r.valid && r.status === 'inconclusive' && r.mde != null ? ` (it could only have shown a change bigger than ${fmt(r.mde, 1)} kWh a day)` : ''}.`);
   const origin = [base, ...tests.map((e) => e.setpoint.from)].reduce((a, b) => (dir > 0 ? Math.min(a, b) : Math.max(a, b)));
-  const cap = origin + dir * MAX_STEPS, T = base + dir * TRIAL_STEP;
-  const declined = new Set([...(th.declined || []), ...tests.filter((e) => e.decision === 'revert').map((e) => e.setpoint.to)]);
-  const beyond = (x) => (dir > 0 ? x > Math.min(cap, limit) : x < Math.max(cap, limit));
-  for (const r of meas.rows.filter((r) => r.decision)) out.reasons.push(`Your ${t(r.to)} test (${r.start} to ${r.end}) ended with “${PLAIN_RESULT[r.status] || r.status}” and you chose to ${r.decision === 'keep' ? 'keep it' : 'go back'}.`);
-  if (pooled && pooled.hi < 0 && pooled.n) return fin({ kind: 'keep', suggested: { temp: base, text: `Keep ${t(base)}` }, why: `Your tests suggest this ${word} change raised use; staying put is the evidence-based choice.`, reasons: out.reasons });
-  if (declined.has(T)) return fin({ kind: 'keep', suggested: { temp: base, text: `Keep ${t(base)}` }, why: `You’ve said ${t(T)} isn’t comfortable, so the app won’t suggest it again.` });
-  if (beyond(T)) return fin({ kind: 'keep', suggested: { temp: base, text: `Keep ${t(base)}` }, why: (dir > 0 ? T > limit : T < limit) ? `${t(T)} is outside the comfort limit you set (${t(limit)}).` : `${t(base)} is as far as the app suggests going from where you started (${t(origin)}). Past that, comfort matters more than a few kWh.` });
+  const cap = origin + dir * MAX_STEPS, T = base + dir * 1;
+  const declined = new Set([...(th.declined || []), ...tests.filter((e) => e.decision === 'revert' || e.comfort === 'no').map((e) => e.setpoint.to)]);
+  const rose = valid.some((r) => r.status === 'increased' && (dir > 0 ? r.to <= T : r.to >= T));
+  if (rose) return keep(`A valid test of yours showed more electricity use at a ${dir > 0 ? 'warmer' : 'cooler'} setting, so the app won’t push further.`);
+  if (declined.has(T)) return keep(`You’ve said ${t(T)} isn’t comfortable, so the app won’t suggest it again.`);
+  if (dir > 0 ? T > limit : T < limit) return keep(`${t(T)} is past the limit in your Settings (${t(limit)}).`);
+  if (dir > 0 ? T > cap : T < cap) return keep(`${t(base)} is as far as the app suggests going from where you started (${t(origin)}). Comfort matters more than the last few degrees.`);
 
-  // 4. What the forecast says about whether it matters right now.
+  // Does cooling (or heating) matter in this home at all? Weather says when it matters — not what a setting is worth.
+  const m = C.energyWeatherModel(state.usage, temps), term = m.status === 'ready' ? (mode === 'cool' ? m.cool : m.heat) : null, matters = !!term && term.per > 0 && term.per > term.ci;
+  if (!matters) return keep(m.status === 'ready' ? `Your readings don’t clearly show ${word} driving your electricity use, so a one-degree test isn’t worth starting yet.` : `Not enough readings with outdoor temperatures yet (${m.n} of 30 days) to tell whether ${word} matters in your home.`, 'keep', { unknown: ['Whether a different setting would change your electricity use at all.'] });
+
   const days = C.dailyOutlook(hours.filter((h) => h.t >= now - 3600e3)).slice(0, 7), active = days.filter((d) => (mode === 'cool' ? d.cdd : d.hdd) >= 2).length;
-  const phase = !days.length ? 'later' : active >= 3 ? 'now' : 'later';
-  const peak = days.length ? Math.round(avg(days.map((d) => d.high))) : null;
-  const away = awaySummary(p);
-  const per = term ? term.per : null, perCi = term ? term.ci : null;
-  const rest = { n: m.n, noise: m.se };
+  const phase = active >= 3 ? 'now' : 'later', peak = days.length ? Math.round(avg(days.map((d) => d.high))) : null, away = awaySummary(p);
   const mde = m.se ? 2.8 * m.se * Math.sqrt(1 / 14 + 1 / 56) : null; // the smallest daily change a two-week test could show
   const trial = { mode, from: base, to: T };
-  if (pref != null) out.reasons.push(`${t(T)} is ${(dir > 0 ? T <= pref : T >= pref) ? 'within' : 'slightly past'} the comfort preference you entered (${t(pref)}).`);
-  if (away.total != null) out.reasons.push(away.total >= 12 ? `You’re out about ${fmt(away.total)} hours a week, so an away-time setting could also matter; the app doesn’t propose one while you hold a steady temperature.` : `You’re home most of the time (out about ${fmt(away.total || 0)} hours a week), so the whole-day setting is what counts, not an away setback.`);
+  out.reasons.push(`To try: ${t(T)} — one degree ${dir > 0 ? 'warmer' : 'cooler'} than your confirmed setting, inside your limits. It is a cautious experiment for comfort and possible savings. It was not calculated as the best temperature, and the app can’t say how much electricity it would save.`);
+  out.reasons.push(out.evidence.verified ? `Shown to save electricity: your ${t(verified.to)} test, ${verified.start} to ${verified.end}, used about ${fmt(out.evidence.verified.range[0], 1)}–${fmt(out.evidence.verified.range[1], 1)} kWh a day less than comparable days (measured over ${verified.days} days, in that weather).` : 'Shown to save electricity: nothing yet. No finished test of yours has a clear result.');
+  if (pref != null) out.reasons.push(`Your comfort preference (${t(pref)}) is only what you said you like. It hasn’t been tested and isn’t treated as your limit.`);
+  out.reasons.push(`Your use rises on hot days, so ${word} is a real part of it. That says when ${word} matters — it does not say what a thermostat change saves.`);
+  out.reasons.push(`Honest limit: day-to-day swings in your whole-home readings are about ±${fmt(m.se, 1)} kWh, so a two-week test can only show a change bigger than about ${fmt(mde, 1)} kWh a day. A one-degree change may be smaller, so expect “No clear difference”. The test would still tell you whether ${t(T)} is comfortable — which is not verified savings.`);
+  if (away.total != null) out.reasons.push(away.total >= 12 ? `You’re out about ${fmt(away.total)} hours a week; an away-time setting could also matter, but the app doesn’t propose one while you hold a steady temperature.` : `You’re home most of the time (out about ${fmt(away.total || 0)} hours a week), so the whole-day setting is what counts, not an away setback.`);
   if (days.length) out.reasons.push(`Forecast, next ${days.length} days: highs average about ${peak}°F; ${active} day${active === 1 ? '' : 's'} with real ${word} demand.`);
-
-  if (!sensitive) {
-    out.unknown.push(m.status === 'ready' ? `Your readings don’t show a clear link between ${word} use and outdoor temperature (weather explains only ${fmt((m.r2 || 0) * 100)}% of daily differences), so what a degree is worth can’t be estimated.` : `What a degree is worth — it needs 30+ days of readings with outdoor temperatures (you have ${m.n}).`);
-    out.unknown.push('Whether you’d notice the difference in comfort.');
-    return fin({ kind: 'unknown', phase, trial, suggested: { temp: null, text: 'Not enough evidence yet' }, why: m.status === 'ready' ? `Your readings don’t show how much a degree would change your use.` : 'Not enough readings with outdoor temperatures yet.', action: { kind: 'experiment', label: `Optional experiment: hold ${t(T)} for two weeks of ${mode === 'cool' ? 'warm' : 'cold'} weather`, trial, enabled: phase === 'now' }, reasons: out.reasons });
-  }
-  const sv = per * TRIAL_STEP, svLo = Math.max(0, per - perCi), svHi = per + perCi;
-  out.reasons.push(`In ${m.n} days of your readings, each 1°F ${mode === 'cool' ? 'hotter' : 'colder'} outside adds about ${fmt(per, 2)} kWh a day (±${fmt(perCi, 2)}). A thermostat one degree ${dir > 0 ? 'warmer' : 'cooler'} should act like weather one degree milder: about ${fmt(svLo, 1)}–${fmt(svHi, 1)} kWh on a ${word} day${$(sv) ? `, about ${$(sv)} a day` : ''}. That is a model, not a measurement.`);
-  const detectable = mde != null && sv >= mde;
-  out.reasons.push(detectable ? `A two-week test could show a change this size.` : `Honest limit: day-to-day swings in your use are large (±${fmt(m.se, 1)} kWh), so a two-week test could only show a change bigger than about ${fmt(mde, 1)} kWh a day. Expect “No clear difference”; the test mainly tells you whether ${t(T)} feels comfortable.`);
-  if (pooled) out.reasons.push(`Your finished tests, pooled: ${pooled.perDeg >= 0 ? 'saved' : 'used more'} about ${fmt(Math.abs(pooled.perDeg), 2)} kWh a day per degree (${fmt(pooled.lo, 2)} to ${fmt(pooled.hi, 2)}).`);
   if (p.hvacMetered !== 'yes') out.unknown.push(`Whether ${word} runs on your meter. If it doesn’t, no setting will change your bill.`);
-  out.unknown.push('Measured savings — the model comes from past weather, not from changing your thermostat.', 'How comfortable you’d find it, including humidity.');
-  const why = phase === 'now' ? `A degree ${dir > 0 ? 'warmer' : 'cooler'} should save roughly ${fmt(svLo, 1)}–${fmt(svHi, 1)} kWh on a ${word} day. That’s an estimate from your readings, not a measurement.` : (days.length ? `It would help on ${mode === 'cool' ? 'warm' : 'cold'} days. The next week is mild (highs near ${peak}°F), so there’s little to save yet.` : `It would help on ${mode === 'cool' ? 'warm' : 'cold'} days. No forecast is loaded, so the app can’t tell yet whether that’s coming.`);
-  return fin({ kind: 'trial', phase, trial, evidence: { perDay: r2(sv), range: [r2(svLo), r2(svHi)], mde: r2(mde), detectable, measured: pooled, ...rest }, suggested: { temp: T, text: t(T) }, why, reasons: out.reasons,
-    action: phase === 'now' ? { kind: 'try', label: `Try ${t(T)}`, trial } : { kind: 'wait', label: `Try it when ${mode === 'cool' ? 'warm' : 'cold'} weather returns`, trial } });
+  out.unknown.push('How much electricity a one-degree change saves — only a valid test can show it.', 'How comfortable you’d find it, including humidity.');
+  const why = `${t(T)} is a cautious ${word} experiment for comfort and possible savings${phase === 'now' ? '' : days.length ? ` (best when it’s ${mode === 'cool' ? 'warm' : 'cold'}; it’s mild now)` : ' (no forecast is loaded to say when)'}; the app can’t say how much it would save.`;
+  return fin({ kind: 'trial', phase, trial, evidence: { ...out.evidence, mde: r2(mde), noise: r2(m.se), n: m.n }, suggested: { temp: T, text: `${t(T)} to try` }, why, reasons: out.reasons,
+    action: phase === 'now' ? { kind: 'try', label: `Try ${t(T)}`, trial } : { kind: 'wait', label: `Optional: try it when ${mode === 'cool' ? 'warm' : 'cold'} weather returns`, trial } });
 }
