@@ -286,9 +286,11 @@ function thermostatCard() {
   return `<section class="card home thermo"><div class="q">
     <p class="eyebrow-s">Thermostat setting for this weather</p>
     <div class="thermo-choice"><div><strong class="thermo-target">${esc(target)}</strong><span class="thermo-mode">${esc(setup)}</span></div>
-      <span class="thermo-flag">${s.kind === 'trial' ? 'Optional trial' : s.kind === 'running' ? 'Testing' : s.kind === 'decide' ? 'Feedback needed' : 'For now'}</span></div>
+      <span class="thermo-flag">${s.kind === 'starter' ? 'Starting point only' : s.kind === 'trial' ? 'Optional trial' : s.kind === 'running' ? 'Testing' : s.kind === 'decide' ? 'Feedback needed' : 'For now'}</span></div>
     <p class="lead thermo-why">${esc(plan.why)}</p>
     <p class="fine">Last thermostat setting you entered: <b>${esc(actualText)}</b>. The app cannot check or change it.</p>
+    ${actual.temp == null ? `<div class="thermo-setup"><h3>Tell me what your thermostat shows</h3>${thermostatFields()}</div>` :
+      `<details class="more th-edit"><summary>Update my thermostat setting</summary>${thermostatFields()}</details>`}
     ${plan.next ? `<div class="thermo-next"><span>When conditions change</span><b>${esc(String(plan.next.temp))}°F · ${esc(plan.next.mode)} · ${esc(plan.next.operation)}</b><small>${esc(plan.next.when)}. Optional experiment, not proven savings.</small></div>` : ''}
     ${action}
     <details class="more"><summary>How weather, usage and bills affected this</summary>
@@ -329,13 +331,12 @@ function viewToday() {
   if (usageDays().length) return homeSimple(st);
   // A new iPhone/PWA install can have your confirmed thermostat but none of the Mac's private meter data.
   // Show the real setting with an explicit data gap, never the old schedule-first screen or made-up savings.
-  if (S.profile.thermostat) return `${pagehead('Home', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}${thermostatCard()}
-    <section class="card home"><div class="q"><p class="eyebrow-s">Electricity data needed</p>
-    <p class="lead">There are no electricity readings on this device.</p>
-    <p>To get recommendations using your household's usage and bills, open <a href="#settings">Settings → Restore or merge</a> and select a backup from your Mac. You can also import a Delmarva usage ZIP.</p>
-    <a class="more-link" href="#settings">Restore or merge a backup ›</a></div></section>`;
   const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
-  const main = [hh, hero(st, rec), learnedToday(), zonesCard(), programCard(st, rec)];
+  const noDataThermostat = S.profile.thermostat || S.profile.setupDone ? [
+    thermostatCard(),
+    '<section class="card home"><div class="q"><p class="eyebrow-s">Electricity data needed</p><p class="lead">There are no electricity readings on this device.</p><p>To use your household’s history, go to <a href="#settings">Settings → Restore or merge</a> for a Mac backup, or import the original Delmarva usage and billing ZIP files.</p></div></section>'
+  ] : [];
+  const main = [hh, ...noDataThermostat, hero(st, rec), learnedToday(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
   if (hint && st.kind !== 'setup' && !(UI.seasonDismissed && Date.now() - UI.seasonDismissed < 3 * 864e5)) {
     main.push(`<section class="card warn"><p class="card-label"><i class="dot"></i>Season check</p><h2>${hint === 'cool_available' ? 'Warm days ahead. Has your building switched to cooling?' : 'Cold days ahead. Has your building switched to heating?'}</h2><div class="row2"><button class="btn primary" data-act="season" data-v="${hint}">Yes, switch</button><button class="btn secondary" data-act="season-dismiss">Not yet</button></div></section>`);
@@ -530,13 +531,37 @@ const ZSEASON = [['unknown', 'Not sure'], ['heat_available', 'Heating'], ['cool_
 const ZMET = [['unknown', 'Not sure'], ['yes', 'Yes'], ['partial', 'Partly (fan only)'], ['no', 'No — building pays']];
 const zsel = (z, f, opts) => `<select data-zone="${esc(z.id)}" data-f="${f}">${opts.map(([v, l]) => `<option value="${v}" ${z[f] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 const znum = (z, f) => `<input type="number" inputmode="numeric" min="40" max="95" data-zone="${esc(z.id)}" data-f="${f}" value="${getPath(z, f)}">`;
+/** User-reported physical thermostat state. Shared by Home and Settings. */
+function thermostatFields() {
+  const t = S.profile.thermostat, p = S.profile;
+  const mode = t?.mode || (p.buildingMode === 'heat_available' ? 'heat' : p.buildingMode === 'cool_available' ? 'cool' : '');
+  const modeOpts = [['', 'Select HEAT or COOL'], ['heat', 'HEAT'], ['cool', 'COOL']];
+  const buildingOpts = [['unknown', 'Not sure'], ['heat_available', 'Heating is available'], ['cool_available', 'Cooling is available'], ['fan_only', 'Fan only']];
+  const opts = (values, chosen) => values.map(([v, label]) => `<option value="${v}" ${chosen === v ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  return `<div class="thermo-save-form">
+    <label class="thermo-field" for="th-set">Temperature actually shown on the wall (°F)
+      <input type="number" id="th-set" inputmode="numeric" min="50" max="90" step="1" value="${t?.setpoint ?? ''}" placeholder="e.g. 70">
+    </label>
+    <label class="thermo-field" for="th-mode">Thermostat mode
+      <select id="th-mode">${opts(modeOpts, mode)}</select>
+    </label>
+    <label class="thermo-field" for="th-building">What the building provides right now
+      <select id="th-building">${opts(buildingOpts, p.buildingMode)}</select>
+    </label>
+    <label class="check"><input type="checkbox" id="th-hold" ${t?.hold ? 'checked' : ''}> HOLD is on</label>
+    <details class="more"><summary>Time-based programming</summary>
+      <label class="thermo-field" for="th-prog">Programming is
+        <select id="th-prog"><option value="off" ${t?.programming !== 'on' ? 'selected' : ''}>Off</option><option value="on" ${t?.programming === 'on' ? 'selected' : ''}>On</option></select>
+      </label>
+    </details>
+    <p id="th-error" class="err" role="alert" aria-live="assertive"></p>
+    <button class="btn primary th-save-button" data-act="th-save" type="button">Save & show my recommendation</button>
+    <p class="fine">This records what you report; the app cannot read or change the physical thermostat.</p>
+  </div>`;
+}
 function thermostatGroup() {
-  const t = S.profile.thermostat;
-  return group('Your thermostat, as you set it', 'What you see on the thermostat itself. The app records it and never changes the thermostat; the weekly schedule in the app stays a proposal unless you program it.',
-    `<label class="item"><span>Holding at (°F)</span><input type="number" inputmode="numeric" min="50" max="90" id="th-set" value="${t ? t.setpoint : ''}" placeholder="e.g. 74"></label>
-    <label class="item"><span>HOLD on</span><input type="checkbox" id="th-hold" ${t?.hold ? 'checked' : ''}></label>
-    <label class="item"><span>Time-based programming</span><select id="th-prog"><option value="off" ${t?.programming === 'off' ? 'selected' : ''}>Off</option><option value="on" ${t?.programming === 'on' ? 'selected' : ''}>On</option></select></label>
-    <div class="item"><button class="btn secondary" data-act="th-save">Save what the thermostat shows</button>${t ? ` <small>Last confirmed ${esc(shortDate(t.confirmed || todayIso()))}</small>` : ''}</div>`);
+  return group('Your thermostat, as you set it', 'Enter exactly what you see on your wall thermostat, then save to update Home.',
+    `<div class="item col">${thermostatFields()}</div>`);
 }
 function zonesGroup() {
   const zs = S.zones || [];
@@ -1441,10 +1466,32 @@ const ACTIONS = {
   'billing-keep'(el) { pendingBilling.splice(+el.dataset.i, 1); render(); toast('Kept the saved billing period.'); },
   'th-save'() {
     const prev = S.profile.thermostat || {}, v = (id) => document.getElementById(id);
-    const t = A.cleanThermostat({ ...prev, mode: S.profile.buildingMode === 'heat_available' ? 'heat' : 'cool', setpoint: +v('th-set')?.value, hold: !!v('th-hold')?.checked, programming: v('th-prog')?.value, confirmed: todayIso() });
-    if (!t) return toast('Enter the temperature shown on the thermostat (50–90°F).', true);
-    try { commitAndReload({ ...S, profile: { ...S.profile, thermostat: t } }, 'thermostat'); } catch (err) { return toast(`Not saved: ${err.message}`, true); }
-    render(); toast(`Saved: ${t.setpoint}°F${t.hold ? ' HOLD' : ''}, programming ${t.programming}. The thermostat itself is unchanged.`);
+    const err = v('th-error'), raw = v('th-set')?.value.trim() || '', mode = v('th-mode')?.value || '';
+    const building = v('th-building')?.value || S.profile.buildingMode;
+    const invalid = (message, field) => {
+      if (err) err.textContent = message;
+      if (field) { v(field)?.setAttribute('aria-invalid', 'true'); v(field)?.focus(); }
+      else toast(message, true);
+    };
+    v('th-set')?.removeAttribute('aria-invalid');
+    v('th-mode')?.removeAttribute('aria-invalid');
+    if (!raw || !Number.isInteger(+raw) || +raw < 50 || +raw > 90)
+      return invalid('Enter the temperature actually shown on the thermostat (50–90°F).', 'th-set');
+    if (!['heat', 'cool'].includes(mode))
+      return invalid('Choose HEAT or COOL as shown on your wall thermostat.', 'th-mode');
+    const t = A.cleanThermostat({
+      ...prev, mode, setpoint: Number(raw), hold: !!v('th-hold')?.checked,
+      programming: v('th-prog')?.value || 'off', confirmed: todayIso()
+    });
+    if (!t) return invalid('Please check the thermostat settings and try saving again.');
+    const acceptedBuilding = ['unknown', 'heat_available', 'cool_available', 'fan_only'].includes(building) ? building : S.profile.buildingMode;
+    try {
+      commitAndReload({ ...S, profile: { ...S.profile, buildingMode: acceptedBuilding, thermostat: t } }, 'thermostat');
+    } catch (e) { return invalid(`The app couldn’t save this on your device: ${e.message}`); }
+    savedNote = { what: `Thermostat ${t.setpoint}°F ${mode.toUpperCase()} recorded`, at: Date.now() };
+    if (route() !== 'today') location.hash = 'today';
+    render();
+    toast(`Saved ${t.setpoint}°F ${mode.toUpperCase()}${t.hold ? ' HOLD' : ''}. Your recommendation has been updated. Your wall thermostat was not changed.`);
   },
 
   'household-review'() { if (householdUpdate) { pendingRestore = { name: 'Mac companion', kind: 'household', update: householdUpdate }; location.hash = 'restore'; render(); } },
@@ -1454,7 +1501,7 @@ const ACTIONS = {
     location.hash = 'try'; render(); window.scrollTo(0, 0);
   },
   'thermo-try'() {
-    const tr = adviceNow().trial; if (!tr) return;
+    const tr = A.thermostatSettingPlan({ state: S, temps: allTemps(), hours: forecastHours() }).action?.trial; if (!tr) return;
     tryDraft = newTry({ step: 3, title: `${tr.mode === 'cool' ? 'Cooling' : 'Heating'} held at ${tr.to}°F instead of ${tr.from}°F`, allDay: true, cooling: true, setpoint: tr });
     location.hash = 'try'; render(); window.scrollTo(0, 0);
   },
