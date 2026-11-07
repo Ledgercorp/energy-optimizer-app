@@ -275,15 +275,30 @@ const agoText = (iso) => { const n = Math.round((Date.parse(`${todayIso()}T12:00
 /** Currently set to · Suggested · Why · What to do. The suggestion is calculated from this home’s own evidence; it is never the comfort preference copied back. */
 const adviceNow = () => A.thermostatAdvice({ state: S, temps: allTemps(), hours: forecastHours() });
 function thermostatCard() {
-  const a = adviceNow(), setTo = a.set != null ? `${a.set}°F` : 'Not entered';
-  const act = !a.action ? '' : a.action.kind === 'try' ? `<button class="btn primary" data-act="thermo-try">${esc(a.action.label)}</button>`
-    : a.action.kind === 'experiment' ? `<p class="fine">${esc(a.action.label)}</p>${a.action.enabled ? '<button class="btn secondary" data-act="thermo-try">Start this experiment</button>' : ''}`
-      : a.action.href ? `<a class="more-link" href="${esc(a.action.href)}">${esc(a.action.label)} ›</a>` : `<p class="fine">${esc(a.action.label)}</p>`;
-  const list = (x) => (x.length ? `<ul class="bullets">${x.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '');
-  return `<section class="card home thermo"><div class="q"><p class="eyebrow-s">Thermostat</p>
-    <dl class="krows"><div><dt>Currently</dt><dd>${esc(setTo)}</dd></div><div><dt>My suggestion</dt><dd class="${a.kind === 'trial' ? 'sug' : 'nosug'}">${esc(a.suggested.text)}</dd></div></dl>
-    <p class="kline"><b>Why</b> ${esc(a.why)}</p>${act ? `<div class="kline"><b>Action</b>${act}</div>` : ''}
-    <details class="more"><summary>Why this temperature?</summary>${list(a.reasons)}${a.unknown.length ? `<h3>Still unknown</h3>${list(a.unknown)}` : ''}<p class="fine">The app never changes your thermostat and never assumes it changed. A suggestion is a cautious one-degree experiment, not a proven best setting.</p>${a.kind === 'trial' ? '<button class="link" data-act="thermo-no">Not comfortable for me</button>' : ''}</details></div></section>`;
+  const plan = A.thermostatSettingPlan({ state: S, temps: allTemps(), hours: forecastHours() }), a = plan.advice;
+  const s = plan.now, actual = plan.current;
+  const target = s.temp == null ? 'Not set' : `${s.temp}°F`;
+  const setup = s.temp == null ? '' : `${s.mode} · ${s.operation}`;
+  const actualText = actual.temp == null ? 'Not recorded yet' : `${actual.temp}°F ${actual.mode?.toUpperCase() || ''}${actual.hold ? ' HOLD' : ''}`;
+  const action = plan.action?.kind === 'try' ? `<button class="btn primary" data-act="thermo-try">Try ${esc(String(s.temp))}°F</button>`
+    : plan.action?.href ? `<a class="more-link" href="${esc(plan.action.href)}">${esc(plan.action.label)} ›</a>` : '';
+  const list = (x) => x.length ? `<ul class="bullets">${x.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '';
+  return `<section class="card home thermo"><div class="q">
+    <p class="eyebrow-s">Thermostat setting for this weather</p>
+    <div class="thermo-choice"><div><strong class="thermo-target">${esc(target)}</strong><span class="thermo-mode">${esc(setup)}</span></div>
+      <span class="thermo-flag">${s.kind === 'trial' ? 'Optional trial' : s.kind === 'running' ? 'Testing' : s.kind === 'decide' ? 'Feedback needed' : 'For now'}</span></div>
+    <p class="lead thermo-why">${esc(plan.why)}</p>
+    <p class="fine">Last thermostat setting you entered: <b>${esc(actualText)}</b>. The app cannot check or change it.</p>
+    ${plan.next ? `<div class="thermo-next"><span>When conditions change</span><b>${esc(String(plan.next.temp))}°F · ${esc(plan.next.mode)} · ${esc(plan.next.operation)}</b><small>${esc(plan.next.when)}. Optional experiment, not proven savings.</small></div>` : ''}
+    ${action}
+    <details class="more"><summary>How weather, usage and bills affected this</summary>
+      <p class="fine"><b>Weather:</b> ${esc(plan.details.weather)}</p>
+      <p class="fine"><b>Measured use:</b> ${esc(plan.details.usage)}</p>
+      <p class="fine"><b>Bills:</b> ${esc(plan.details.bill)}</p>
+      <p class="fine">${esc(plan.details.note)}</p>${list(a.reasons)}
+      ${a.unknown.length ? `<h3>Still unknown</h3>${list(a.unknown)}` : ''}
+      ${a.kind === 'trial' ? '<button class="link" data-act="thermo-no">Not comfortable for me</button>' : ''}
+    </details></div></section>`;
 }
 function homeSimple(st) {
   const r = report(), b = r.baseline, bv = A.billView({ state: S, temps: allTemps() }), sp = planNow(), fc = bv.forecast, proj = bv.projection, last = usageDays().at(-1)?.date;
@@ -312,6 +327,13 @@ function homeSimple(st) {
 function viewToday() {
   const rec = recNow(), st = A.todayStatus(S, rec);
   if (usageDays().length) return homeSimple(st);
+  // A new iPhone/PWA install can have your confirmed thermostat but none of the Mac's private meter data.
+  // Show the real setting with an explicit data gap, never the old schedule-first screen or made-up savings.
+  if (S.profile.thermostat) return `${pagehead('Home', esc(fmtNY(Date.now(), { weekday: 'long', month: 'long', day: 'numeric' })))}${thermostatCard()}
+    <section class="card home"><div class="q"><p class="eyebrow-s">Electricity data needed</p>
+    <p class="lead">There are no electricity readings on this device.</p>
+    <p>To get recommendations using your household's usage and bills, open <a href="#settings">Settings → Restore or merge</a> and select a backup from your Mac. You can also import a Delmarva usage ZIP.</p>
+    <a class="more-link" href="#settings">Restore or merge a backup ›</a></div></section>`;
   const hh = householdUpdate && !householdUpdate.dismissed && !(S.appliedUpdates || []).includes(householdUpdate.id) ? householdPreviewHtml(householdUpdate, 'from your Mac companion') : '';
   const main = [hh, hero(st, rec), learnedToday(), zonesCard(), programCard(st, rec)];
   const hint = A.seasonHint(S.profile, rec.outlook);
