@@ -488,3 +488,17 @@ details.more.card-more { overflow-x: clip; }
 .thermo-next span { font-size: 12px; color: var(--ink-3); }
 .thermo-next b { font-size: 18px; }
 .thermo-next small { font-size: 13px; color: var(--ink-2); }
+
+/* v26: mobile-first, genuinely savable physical thermostat settings */
+.thermo-setup { border-top: 1px solid var(--line); margin: 14px 0 4px; padding-top: 12px; }
+.thermo-setup h3 { font-size: 17px; margin: 0 0 8px; }
+.thermo-save-form { display: flex; flex-direction: column; gap: 12px; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 0 10px; }
+.thermo-field { display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; min-width: 0; font-size: 14px; font-weight: 650; color: var(--ink-2); }
+.thermo-save-form input[type=number], .thermo-save-form select { width: 100%; min-width: 0; max-width: 100%; min-height: 48px; box-sizing: border-box; font-size: 17px; }
+.thermo-save-form .th-save-button { display: block; width: 100%; min-height: 52px; margin: 0; font-size: 16px; white-space: normal; }
+.thermo-save-form .err:empty { display: none; }
+.thermo-save-form .err { margin: 0; }
+.thermo-save-form .check { justify-content: flex-start; }
+.thermo-save-form details.more > summary { font-size: 14px; }
+.thermo-save-form > .fine { margin: 0; }
+.thermo .th-edit { margin: 10px 0; }
