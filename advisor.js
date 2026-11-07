@@ -2679,27 +2679,30 @@ export function thermostatAdvice({ state, temps = {}, hours = [], now = Date.now
 // The observed outdoor/usage relationship can gate experiments, not predict kWh saved.
 // Bills provide cost/normality context only; a dollar amount never selects a thermostat degree.
 export function thermostatSettingPlan({ state, temps = {}, hours = [], now = Date.now() }) {
-  const advice = thermostatAdvice({ state, temps, hours, now }), th = state.profile.thermostat;
-  const mode = advice.mode === 'heat' ? 'HEAT' : 'COOL';
-  const operation = th && th.hold ? 'HOLD' : th?.programming === 'on' ? 'PROGRAM' : 'MANUAL';
+  const advice = thermostatAdvice({ state, temps, hours, now }), p = state.profile, th = p.thermostat;
   const future = (Array.isArray(hours) ? hours : []).filter((h) => Number.isFinite(h.t) && Number.isFinite(h.tempF) && h.t >= now - 3600e3);
   const outlook = C.dailyOutlook(future).slice(0, 7);
-  const demandDays = outlook.filter((d) => (advice.mode === 'cool' ? d.cdd : d.hdd) >= 2).length;
-  const currentModeKnown = state.profile.buildingMode !== 'unknown' && (C.BUILDING_MODES[state.profile.buildingMode] || []).includes(advice.mode);
-  const canTry = currentModeKnown && advice.kind === 'trial' && advice.phase === 'now' && outlook.length > 0;
-  const rightNow = canTry ? advice.suggested.temp : advice.set;
-  const newSetting = { temp: rightNow, mode, operation, kind: advice.kind === 'running' ? 'running' : advice.kind === 'decide' ? 'decide' : canTry ? 'trial' : 'keep', confirmed: false };
-  const next = currentModeKnown && !canTry && advice.kind === 'trial' && advice.suggested.temp != null ? {
-    temp: advice.suggested.temp, mode, operation, when: outlook.length ? 'When sustained ' + (advice.mode === 'cool' ? 'warm' : 'cold') + ' weather returns' : 'When the weather forecast is available and the system is needed',
-    kind: 'optional-test'
-  } : null;
+  const coolingDays = outlook.filter((d) => d.cdd >= 2).length;
+  const heatingDays = outlook.filter((d) => d.hdd >= 2).length;
+  const guessed = heatingDays >= 3 && heatingDays > coolingDays ? 'heat' : coolingDays >= 3 && coolingDays > heatingDays ? 'cool' : null;
+  const building = p.buildingMode;
+  // Without a physical setting, only give an explicitly conditional *starting point*.
+  // Weather does not establish the building's mode and cannot confirm a wall thermostat setting.
+  const provisionalMode = building === 'heat_available' ? (heatingDays >= 3 ? 'heat' : null)
+    : building === 'cool_available' ? (coolingDays >= 3 ? 'cool' : null)
+      : building === 'unknown' ? guessed : null;
+  const mode = th?.mode || provisionalMode || advice.mode;
+  const modeText = mode === 'heat' ? 'HEAT' : 'COOL';
+  const operation = th ? (th.hold ? 'HOLD' : th.programming === 'on' ? 'PROGRAM' : 'MANUAL') : 'HOLD';
+  const demandDays = mode === 'heat' ? heatingDays : coolingDays;
+  const currentModeKnown = building !== 'unknown' && (C.BUILDING_MODES[building] || []).includes(mode);
   const m = C.energyWeatherModel(state.usage, temps);
-  const term = m.status === 'ready' ? (advice.mode === 'cool' ? m.cool : m.heat) : null;
+  const term = m.status === 'ready' ? (mode === 'cool' ? m.cool : m.heat) : null;
   const weatherSensitive = !!term && term.per > 0 && term.per > term.ci;
   const usage = weatherSensitive
-    ? 'Past whole-home readings tend to rise when it gets ' + (advice.mode === 'cool' ? 'hotter' : 'colder') + ' outside. That cannot tell how much changing the indoor setpoint saves.'
-    : m.status === 'ready' ? 'Past whole-home readings do not clearly isolate ' + (advice.mode === 'cool' ? 'cooling' : 'heating') + ' demand. No setpoint saving is established.'
-      : 'Not enough readings matched with weather to tell how strongly the system affects electricity use.';
+    ? 'Past whole-home readings tend to rise when it gets ' + (mode === 'cool' ? 'hotter' : 'colder') + ' outside. That cannot tell how much changing the indoor setpoint saves.'
+    : m.status === 'ready' ? 'Past whole-home readings do not clearly isolate ' + (mode === 'cool' ? 'cooling' : 'heating') + ' demand. No setpoint saving is established.'
+      : 'Not enough readings matched with weather to measure whether this temperature change reduces electricity use.';
   const billHistory = cleanBills(state.bills).filter((b) => Number.isFinite(b.amount) && b.amount >= 0);
   const projection = currentProjection(state), latest = billHistory[billHistory.length - 1];
   const normal = projection ? billNormal(billHistory, projection.amount) : null;
@@ -2707,20 +2710,62 @@ export function thermostatSettingPlan({ state, temps = {}, hours = [], now = Dat
     (normal?.known ? (normal.within ? ', around the usual bill range.' : ', outside the usual bill range.') : '.') +
     ' This helps track costs, but cannot identify the best indoor temperature.'
     : latest ? 'Your most recent finalized bill was $' + latest.amount.toFixed(2) + '. Bill totals cannot determine savings per thermostat degree.'
-      : 'No final bill entered yet. Bill data cannot determine savings per thermostat degree.';
+      : 'No final bill entered on this phone. Import the Delmarva billing ZIP to compare bills; a bill cannot prove the best setpoint.';
   const weather = outlook.length ? demandDays + ' of the next ' + outlook.length + ' forecast days have meaningful ' +
-    (advice.mode === 'cool' ? 'cooling' : 'heating') + ' demand.' : 'No usable forecast is loaded.';
+    (mode === 'cool' ? 'cooling' : 'heating') + ' demand.' : 'No usable forecast is loaded.';
+  const details = { weather, usage, bill, note: 'This is a local weather-and-meter decision, not an AI model running on your iPhone. No automatic thermostat control; do not switch building HEAT/COOL mode solely because of the forecast.' };
+  const current = { temp: advice.set, mode: th?.mode || null, hold: !!th?.hold, confirmed: th?.confirmed || '' };
+  const base = { advice, details, current, evidenceLevel: advice.evidence.level, forecastDays: outlook.length, demandDays };
+  if (!th) {
+    const temp = provisionalMode === 'heat' ? 68 : provisionalMode === 'cool' ? 78 : null;
+    const why = temp == null
+      ? 'The app cannot tell which system the building provides right now. Confirm the mode and the temperature on your wall thermostat.'
+      : weather + ' ' + temp + '°F is a general ' + (provisionalMode === 'heat' ? 'heating' : 'cooling') +
+        ' starting point, not a measured optimum. ' +
+        (building === 'unknown' ? 'Your building mode is unconfirmed: check that ' + modeText + ' is available first. ' : '') +
+        'Enter what your wall thermostat actually shows to get an individualized next step.';
+    return { ...base, now: { temp, mode: temp == null ? null : modeText, operation: temp == null ? null : operation, kind: temp == null ? 'unknown' : 'starter', confirmed: false },
+      next: null, why, action: null };
+  }
+
+  const sparse = m.status !== 'ready' && advice.kind === 'keep' && /^Not enough readings with outdoor temperatures/.test(advice.why);
+  const candidate = advice.set + (mode === 'cool' ? 1 : -1);
+  const boundary = mode === 'cool' ? p.comfort?.max ?? 85 : p.comfort?.min ?? 60;
+  const inBounds = candidate >= 50 && candidate <= 90 && (mode === 'cool' ? candidate <= boundary : candidate >= boundary);
+  const declined = new Set([...(th.declined || []), ...(state.experiments || []).filter((e) => e.setpoint?.mode === mode && (e.decision === 'revert' || e.comfort === 'no')).map((e) => e.setpoint.to)]);
+  const currentTests = (state.experiments || []).filter((e) => e.setpoint?.mode === mode && e.setpoint?.confirmedAt);
+  const origin = [advice.set, ...currentTests.map((e) => e.setpoint.from)].reduce((a, b) => (mode === 'cool' ? Math.min(a, b) : Math.max(a, b)));
+  const withinTwoDegrees = mode === 'cool' ? candidate <= origin + 2 : candidate >= origin - 2;
+  const sparseTrialEligible = sparse && p.hvacMetered !== 'no' &&
+    demandDays >= 3 && th.hold && th.programming === 'off' &&
+    inBounds && withinTwoDegrees && !declined.has(candidate) &&
+    !currentTests.some((e) => !e.end || !e.decision);
+  const canOfferSparseTrial = sparseTrialEligible && currentModeKnown;
+  const conditionalTrial = sparseTrialEligible && building === 'unknown';
+  const canTry = currentModeKnown && advice.kind === 'trial' && advice.phase === 'now' && outlook.length > 0 || canOfferSparseTrial;
+  const trial = canOfferSparseTrial ? { mode, from: advice.set, to: candidate } : advice.trial;
+  const target = canOfferSparseTrial ? candidate : canTry ? advice.suggested.temp : advice.set;
+  const newSetting = { temp: target, mode: modeText, operation, kind: advice.kind === 'running' ? 'running' :
+    advice.kind === 'decide' ? 'decide' : canTry ? 'trial' : 'keep', confirmed: false };
+  const next = conditionalTrial ? {
+    temp: candidate, mode: modeText, operation, when: 'Only if you confirm the building currently provides ' + modeText,
+    kind: 'conditional'
+  } : currentModeKnown && !canTry && advice.kind === 'trial' && advice.suggested.temp != null ? {
+    temp: advice.suggested.temp, mode: modeText, operation,
+    when: outlook.length ? 'When sustained ' + (mode === 'cool' ? 'warm' : 'cold') + ' weather returns' : 'When a fresh forecast is available',
+    kind: 'optional-test'
+  } : null;
   let why;
-  if (advice.set == null) why = 'Enter the temperature shown on the wall thermostat before the app suggests changes.';
-  else if (!currentModeKnown) why = 'Confirm whether your building currently supports ' + mode + ' before changing the thermostat.';
-  else if (advice.kind === 'running') why = 'A thermostat experiment is already running. Keep its confirmed setting until you decide to stop.';
+  if (conditionalTrial) why = weather + ' If the building provides ' + modeText + ', ' + candidate + '°F is an optional one-degree comfort trial. Confirm the building mode first; no bill savings have been measured.';
+  else if (!currentModeKnown) why = 'Confirm whether your building currently supports ' + modeText + ' before changing the thermostat.';
+  else if (advice.kind === 'running') why = 'Your confirmed temperature experiment is still running. Keep that setting until you decide to stop.';
   else if (advice.kind === 'decide') why = 'Your last temperature test needs your comfort feedback before another recommendation.';
-  else if (!outlook.length) why = 'No current weather forecast is available, so keep the confirmed setting for now.';
-  else if (canTry) why = weather + ' Your electricity readings suggest this system matters. Try one degree ' + (advice.mode === 'cool' ? 'warmer' : 'cooler') + ' only if comfortable; the bill saving is unknown.';
-  else if (advice.kind === 'trial') why = weather + ' It is not worth changing the thermostat just for the current weather.';
+  else if (!outlook.length) why = 'No fresh weather forecast is available. Keep the last confirmed setting for now.';
+  else if (canOfferSparseTrial) why = weather + ' ' + candidate + '°F is an optional one-degree comfort trial based on the weather, with limited meter data. Saving electricity has not been measured. Keep ' + advice.set + '°F if you prefer.';
+  else if (canTry) why = weather + ' Whole-home readings suggest this system matters. Try one degree ' + (mode === 'cool' ? 'warmer' : 'cooler') + ' only if comfortable; the bill saving is unknown.';
+  else if (advice.kind === 'trial') why = weather + ' It is not worth changing the thermostat for the current forecast.';
   else why = weather + ' ' + advice.why;
-  return { advice, now: newSetting, next, why, action: canTry ? advice.action : advice.kind === 'running' || advice.kind === 'decide' ? advice.action : null,
-    details: { weather, usage, bill, note: 'No automatic thermostat control. Never change building HEAT/COOL mode from weather alone.' },
-    current: { temp: advice.set, mode: th?.mode || null, hold: !!th?.hold, confirmed: th?.confirmed || '' },
-    evidenceLevel: advice.evidence.level, forecastDays: outlook.length, demandDays };
+  return { ...base, now: newSetting, next, why,
+    action: canTry && trial ? { kind: 'try', label: 'Try ' + target + '°F', trial } :
+      advice.kind === 'running' || advice.kind === 'decide' ? advice.action : null };
 }
