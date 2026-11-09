@@ -1037,6 +1037,6 @@
 "2026-11-04":{"mean":60.1,"min":46.4,"max":74,"hours":24,"precip":0.01,"complete":true},
 "2026-11-05":{"mean":67,"min":60.8,"max":73,"hours":24,"precip":0,"complete":true},
 "2026-11-06":{"mean":62.7,"min":53.6,"max":66.2,"hours":24,"precip":0.18,"complete":true},
-"2026-11-07":{"mean":52.9,"min":46.9,"max":59,"hours":24,"precip":0,"complete":true},
-"2026-11-08":{"mean":51.1,"min":44.6,"max":60.8,"hours":15,"precip":null,"complete":false}
+"2026-11-07":{"mean":52.9,"min":47,"max":59,"hours":24,"precip":0,"complete":true},
+"2026-11-08":{"mean":52.4,"min":44.6,"max":62,"hours":21,"precip":0,"complete":true}
 }
