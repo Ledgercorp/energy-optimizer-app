@@ -4,25 +4,25 @@
   "iem": "ILG",
   "name": "Wilmington airport (KILG)"
  },
- "updatedAt": "2026-11-16T02:13:08.962Z",
- "lastSnapshotAt": "2026-11-16T02:13:08.962Z",
+ "updatedAt": "2026-11-16T09:51:11.557Z",
+ "lastSnapshotAt": "2026-11-16T09:51:11.557Z",
  "lastObservation": {
-  "key": "2026-11-16T02:00Z",
-  "t": 37.4,
-  "rh": 69.7,
-  "wind": 8.1,
+  "key": "2026-11-16T10:00Z",
+  "t": 33.8,
+  "rh": 80.4,
+  "wind": 6.9,
   "precip": null,
-  "at": "2026-11-16T01:50:00.000Z",
+  "at": "2026-11-16T09:30:00.000Z",
   "src": "nws"
  },
- "hours": 24860,
+ "hours": 24868,
  "days": 1033,
  "coverageFrom": "2024-01-01T01:00Z",
  "missingLast10Days": 0,
  "added": {
   "nws": {
-   "added": 4,
-   "updated": 5
+   "added": 8,
+   "updated": 17
   },
   "iem": null
  },
